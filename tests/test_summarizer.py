@@ -16,6 +16,8 @@ def test_build_summary_prompt_persian_has_header_only_and_forbids_name_in_body()
     )
     assert "📌 خلاصه صحبت‌های mr.vaez:" in system_prompt
     assert "در متن خلاصه به هیچ وجه نام گوینده" in system_prompt
+    assert "خیلی خلاصه و فشرده" in system_prompt
+    assert "نکات مهم و حساس" in system_prompt
     assert "mr.vaez میگه که" not in system_prompt
 
 
@@ -27,6 +29,8 @@ def test_build_summary_prompt_english_has_header_only_and_forbids_name_in_body()
     )
     assert "📌 Summary of mr.vaez's voice:" in system_prompt
     assert "Do NOT mention the speaker's name" in system_prompt
+    assert "ultra-concise" in system_prompt
+    assert "critical and sensitive details" in system_prompt
     assert "mr.vaez says that" not in system_prompt
 
 
