@@ -1,4 +1,4 @@
-"""Bounded TTL in-memory cache for storing full voice transcripts."""
+"""Bounded TTL in-memory cache for storing full voice transcripts and summaries."""
 
 from __future__ import annotations
 
@@ -10,15 +10,17 @@ from dataclasses import dataclass
 
 @dataclass(slots=True)
 class TranscriptEntry:
-    """Cached transcript entry with speaker name and timestamp."""
+    """Cached transcript and summary entry with speaker name, language, and timestamp."""
 
     speaker_name: str
     text: str
+    summary: str
+    language: str
     created_at: float
 
 
 class TranscriptCache:
-    """Bounded LRU + TTL cache for voice message transcripts."""
+    """Bounded LRU + TTL cache for voice message transcripts and summaries."""
 
     def __init__(self, ttl_seconds: int = 3600, max_items: int = 500) -> None:
         self.ttl_seconds = ttl_seconds
@@ -35,8 +37,14 @@ class TranscriptCache:
         for k in expired_keys:
             self._store.pop(k, None)
 
-    def put(self, speaker_name: str, text: str) -> str:
-        """Store transcript and return a compact 12-char cache ID."""
+    def put(
+        self,
+        speaker_name: str,
+        text: str,
+        summary: str = "",
+        language: str = "fa",
+    ) -> str:
+        """Store transcript and summary and return a compact 12-char cache ID."""
         self._evict_expired()
         while len(self._store) >= self.max_items:
             self._store.popitem(last=False)
@@ -45,6 +53,8 @@ class TranscriptCache:
         self._store[cache_id] = TranscriptEntry(
             speaker_name=speaker_name,
             text=text,
+            summary=summary or text,
+            language=language,
             created_at=time.monotonic(),
         )
         return cache_id

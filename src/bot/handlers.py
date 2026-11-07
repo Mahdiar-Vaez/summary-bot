@@ -9,7 +9,7 @@ from typing import Any
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from src.bot.cache import TranscriptCache, chunk_text
 from src.bot.extractors import extract_voice_target
@@ -17,6 +17,7 @@ from src.bot.keyboards import build_transcript_keyboard
 from src.exceptions import FileTooLargeError, ProviderChainExhaustedError
 from src.services.stt.manager import STTManager
 from src.services.summarizer.manager import SummarizerManager
+from src.services.tts.manager import TTSManager
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,12 @@ async def process_voice_request(
             language=stt_result.language,
         )
 
-        cache_id = cache.put(speaker_name=speaker_name, text=stt_result.text)
+        cache_id = cache.put(
+            speaker_name=speaker_name,
+            text=stt_result.text,
+            summary=summary_result.summary,
+            language=summary_result.language,
+        )
         keyboard = build_transcript_keyboard(
             cache_id=cache_id, language=summary_result.language
         )
@@ -156,10 +162,49 @@ async def handle_transcript_callback(
             await msg.reply(chunk)
 
 
+async def handle_tts_callback(
+    callback: Any, cache: TranscriptCache, tts_manager: TTSManager
+) -> None:
+    """Synthesize and send the voice summary when the user clicks the audio summary button."""
+    data = getattr(callback, "data", "") or ""
+    cache_id = data.split(":", 1)[1] if ":" in data else ""
+    entry = cache.get(cache_id)
+
+    if entry is None:
+        await callback.answer(
+            "⏳ خلاصه این ویس از حافظه موقت منقضی شده است. لطفاً دوباره ویس را ارسال کنید.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer("🔊 در حال تولید فایل صوتی خلاصه...")
+    msg = getattr(callback, "message", None)
+    if msg is None:
+        return
+
+    try:
+        tts_result = await tts_manager.synthesize(
+            text=entry.summary, language=entry.language
+        )
+        caption = (
+            f"🔊 نسخه صوتی خلاصه صحبت‌های {entry.speaker_name}"
+            if entry.language == "fa"
+            else f"🔊 Audio summary of {entry.speaker_name}'s voice"
+        )
+        audio_file = BufferedInputFile(
+            tts_result.audio_bytes, filename=f"summary_{cache_id}.mp3"
+        )
+        await msg.reply_voice(voice=audio_file, caption=caption)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to generate TTS audio summary: %s", exc)
+        await msg.reply("❌ متأسفانه در تولید فایل صوتی خلاصه خطایی رخ داد.")
+
+
 def create_bot_router(
     stt_manager: STTManager,
     summarizer_manager: SummarizerManager,
     cache: TranscriptCache,
+    tts_manager: TTSManager | None = None,
     max_file_size_mb: int = 20,
 ) -> Router:
     """Create and wire the aiogram Router with all commands, voice handlers, and callbacks."""
@@ -171,8 +216,8 @@ def create_bot_router(
             "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس هستم.\n\n"
             "✨ چطور از من استفاده کنی؟\n"
             "۱. در چت خصوصی: هر ویس یا فایل صوتی را مستقیم برایم بفرست یا فوروارد کن.\n"
-            "۲. در گروه‌ها: روی هر ویسی ریپلای بزن و دستور /summary یا /خلاصه را بنویس.\n\n"
-            "من زبان ویس (فارسی یا انگلیسی) و نام گوینده را تشخیص می‌دهم و خلاصه‌ی دقیق صحبت‌هایش را به همراه متن کامل تحویلت می‌دهم!"
+            "۲. در گروه‌ها: روی هر ویسی ریپلای بزن و بنویس خلاصه (یا دستور /summary).\n\n"
+            "من زبان ویس (فارسی یا انگلیسی) و نام گوینده را تشخیص می‌دهم و خلاصه‌ی دقیق صحبت‌هایش را به صورت متنی و صوتی تحویلت می‌دهم!"
         )
 
     @router.message(Command("summary", "summarize", "خلاصه"))
@@ -214,5 +259,10 @@ def create_bot_router(
     @router.callback_query(F.data.startswith("transcript:"))
     async def on_transcript_button(callback: CallbackQuery) -> None:
         await handle_transcript_callback(callback, cache)
+
+    @router.callback_query(F.data.startswith("tts:"))
+    async def on_tts_button(callback: CallbackQuery) -> None:
+        if tts_manager is not None:
+            await handle_tts_callback(callback, cache, tts_manager)
 
     return router

@@ -6,6 +6,7 @@ from src.bot.extractors import extract_voice_target
 from src.bot.handlers import (
     create_bot_router,
     handle_transcript_callback,
+    handle_tts_callback,
     process_voice_request,
     should_trigger_on_reply,
 )
@@ -14,6 +15,7 @@ from src.exceptions import ProviderChainExhaustedError
 from src.main import build_stt_manager, build_summarizer_manager
 from src.services.stt.base import TranscriptionResult
 from src.services.summarizer.base import SummaryResult
+from src.services.tts.base import TTSResult
 
 
 def test_extract_voice_target_from_reply_and_hidden_forward():
@@ -259,3 +261,35 @@ def test_should_trigger_on_reply_detects_voice_replies_in_private_and_group():
     assert should_trigger_on_reply(group_mention_reply, bot_username="vaez_summary_bot") is True
     assert should_trigger_on_reply(group_keyword_reply, bot_username="vaez_summary_bot") is True
     assert should_trigger_on_reply(group_unrelated_reply, bot_username="vaez_summary_bot") is False
+
+
+@pytest.mark.asyncio
+async def test_handle_tts_callback_sends_voice_reply():
+    sent_voices = []
+
+    class DummyMsg:
+        async def reply_voice(self, voice, caption=None):
+            sent_voices.append((voice, caption))
+
+    class DummyCallback:
+        def __init__(self, cid: str):
+            self.data = f"tts:{cid}"
+            self.message = DummyMsg()
+
+        async def answer(self, text: str | None = None, show_alert: bool = False):
+            pass
+
+    class DummyTTS:
+        async def synthesize(self, text: str, language: str) -> TTSResult:
+            return TTSResult(audio_bytes=b"MP3AUDIO", language=language, provider="edge-tts")
+
+    cache = TranscriptCache()
+    cid = cache.put(
+        speaker_name="mr.vaez",
+        text="متن کامل ویس",
+        summary="📌 خلاصه صحبت‌های mr.vaez:\nجلسه فردا برگزار می‌شود.",
+        language="fa",
+    )
+    await handle_tts_callback(DummyCallback(cid), cache, DummyTTS())
+    assert len(sent_voices) == 1
+    assert "mr.vaez" in (sent_voices[0][1] or "")

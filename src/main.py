@@ -20,7 +20,9 @@ from src.services.summarizer.gemini_llm import GeminiSummarizerProvider
 from src.services.summarizer.groq_llm import GroqSummarizerProvider
 from src.services.summarizer.manager import SummarizerManager
 from src.services.summarizer.openrouter_llm import OpenRouterSummarizerProvider
-
+from src.services.tts.edge_tts_provider import EdgeTTSProvider
+from src.services.tts.google_tts import GoogleTranslateTTSProvider
+from src.services.tts.manager import TTSManager
 
 GEMINI_FALLBACK_MODELS = (
     "gemini-3.5-flash",
@@ -70,10 +72,16 @@ def build_summarizer_manager(settings: Settings) -> SummarizerManager:
     return SummarizerManager(providers)
 
 
+def build_tts_manager() -> TTSManager:
+    """Build TTSManager fallback chain (Edge Neural TTS -> Google Translate TTS)."""
+    return TTSManager([EdgeTTSProvider(), GoogleTranslateTTSProvider()])
+
+
 def build_dispatcher(settings: Settings) -> Dispatcher:
     """Create and configure the aiogram Dispatcher."""
     stt_manager = build_stt_manager(settings)
     summarizer_manager = build_summarizer_manager(settings)
+    tts_manager = build_tts_manager()
     cache = TranscriptCache(
         ttl_seconds=settings.transcript_cache_ttl_seconds,
         max_items=settings.transcript_cache_max_items,
@@ -84,6 +92,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
             stt_manager=stt_manager,
             summarizer_manager=summarizer_manager,
             cache=cache,
+            tts_manager=tts_manager,
             max_file_size_mb=settings.max_file_size_mb,
         )
     )
@@ -99,7 +108,7 @@ async def main() -> None:
     settings = Settings()
     if not settings.has_any_stt_provider():
         raise RuntimeError(
-            "No STT provider configured! Please set GROQ_API_KEY in your .env file."
+            "No STT provider configured! Please set GEMINI_API_KEY or GROQ_API_KEY in your .env file."
         )
     if not settings.has_any_llm_provider():
         raise RuntimeError(
