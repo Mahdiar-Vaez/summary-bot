@@ -20,6 +20,37 @@ from src.services.summarizer.manager import SummarizerManager
 
 logger = logging.getLogger(__name__)
 
+_REPLY_TRIGGER_KEYWORDS = (
+    "خلاصه",
+    "چی میگه",
+    "چی گفت",
+    "summary",
+    "summarize",
+    "tldr",
+)
+
+
+def should_trigger_on_reply(message: Any, bot_username: str | None = None) -> bool:
+    """Return True if a reply message should trigger voice summarization."""
+    replied = getattr(message, "reply_to_message", None)
+    if replied is None:
+        return False
+    has_media = bool(
+        getattr(replied, "voice", None) or getattr(replied, "audio", None)
+    )
+    if not has_media:
+        return False
+
+    chat = getattr(message, "chat", None)
+    chat_type = getattr(chat, "type", "private")
+    if chat_type == "private":
+        return True
+
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").lower()
+    if bot_username and f"@{bot_username.lower()}" in text:
+        return True
+    return any(kw in text for kw in _REPLY_TRIGGER_KEYWORDS)
+
 
 async def process_voice_request(
     message: Any,
@@ -165,6 +196,20 @@ def create_bot_router(
             cache=cache,
             max_file_size_mb=max_file_size_mb,
         )
+
+    @router.message(F.reply_to_message)
+    async def on_reply_to_voice(message: Message) -> None:
+        me = await message.bot.get_me() if message.bot else None
+        username = getattr(me, "username", None)
+        if should_trigger_on_reply(message, bot_username=username):
+            await process_voice_request(
+                message=message,
+                bot=message.bot,
+                stt_manager=stt_manager,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+                max_file_size_mb=max_file_size_mb,
+            )
 
     @router.callback_query(F.data.startswith("transcript:"))
     async def on_transcript_button(callback: CallbackQuery) -> None:

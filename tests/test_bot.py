@@ -3,7 +3,12 @@ from types import SimpleNamespace
 import pytest
 from src.bot.cache import TranscriptCache, chunk_text
 from src.bot.extractors import extract_voice_target
-from src.bot.handlers import handle_transcript_callback, process_voice_request
+from src.bot.handlers import (
+    create_bot_router,
+    handle_transcript_callback,
+    process_voice_request,
+    should_trigger_on_reply,
+)
 from src.config import Settings
 from src.exceptions import ProviderChainExhaustedError
 from src.main import build_stt_manager, build_summarizer_manager
@@ -225,3 +230,32 @@ def test_build_managers_with_gemini_creates_multi_model_fallback_chain():
         "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
     ]
+
+
+def test_should_trigger_on_reply_detects_voice_replies_in_private_and_group():
+    replied_voice = SimpleNamespace(voice=SimpleNamespace(file_id="v1"), audio=None)
+    private_reply = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        text="چی میگه؟",
+        reply_to_message=replied_voice,
+    )
+    group_mention_reply = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        text="@vaez_summary_bot خلاصه کن",
+        reply_to_message=replied_voice,
+    )
+    group_keyword_reply = SimpleNamespace(
+        chat=SimpleNamespace(type="group"),
+        text="خلاصه",
+        reply_to_message=replied_voice,
+    )
+    group_unrelated_reply = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        text="باشه مرسی",
+        reply_to_message=replied_voice,
+    )
+
+    assert should_trigger_on_reply(private_reply, bot_username="vaez_summary_bot") is True
+    assert should_trigger_on_reply(group_mention_reply, bot_username="vaez_summary_bot") is True
+    assert should_trigger_on_reply(group_keyword_reply, bot_username="vaez_summary_bot") is True
+    assert should_trigger_on_reply(group_unrelated_reply, bot_username="vaez_summary_bot") is False
