@@ -8,25 +8,26 @@ from src.services.summarizer.openrouter_llm import OpenRouterSummarizerProvider
 from src.services.summarizer.manager import SummarizerManager
 
 
-def test_build_summary_prompt_persian_includes_speaker_attribution():
+def test_build_summary_prompt_persian_has_header_only_and_forbids_name_in_body():
     system_prompt, user_prompt = build_summary_prompt(
         transcript="سلام، فردا ساعت ده جلسه داریم و باید گزارش فروش آماده بشه.",
-        speaker_name="مهدیار",
+        speaker_name="mr.vaez",
         language="fa",
     )
-    assert "مهدیار میگه که" in system_prompt
-    assert "📌 خلاصه صحبت‌های مهدیار" in system_prompt
-    assert "مهدیار" in user_prompt
+    assert "📌 خلاصه صحبت‌های mr.vaez:" in system_prompt
+    assert "در متن خلاصه به هیچ وجه نام گوینده" in system_prompt
+    assert "mr.vaez میگه که" not in system_prompt
 
 
-def test_build_summary_prompt_english_includes_speaker_attribution():
+def test_build_summary_prompt_english_has_header_only_and_forbids_name_in_body():
     system_prompt, user_prompt = build_summary_prompt(
         transcript="Hey team, let's deploy the release tomorrow morning at 9am.",
-        speaker_name="Alex",
+        speaker_name="mr.vaez",
         language="en",
     )
-    assert "Alex says that" in system_prompt
-    assert "📌 Summary of Alex's voice" in system_prompt
+    assert "📌 Summary of mr.vaez's voice:" in system_prompt
+    assert "Do NOT mention the speaker's name" in system_prompt
+    assert "mr.vaez says that" not in system_prompt
 
 
 @pytest.mark.asyncio
