@@ -1,0 +1,173 @@
+"""Telegram bot handlers for voice/audio messages, replies, and inline callbacks."""
+
+from __future__ import annotations
+
+import logging
+import tempfile
+from pathlib import Path
+from typing import Any
+
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message
+
+from src.bot.cache import TranscriptCache, chunk_text
+from src.bot.extractors import extract_voice_target
+from src.bot.keyboards import build_transcript_keyboard
+from src.exceptions import FileTooLargeError, ProviderChainExhaustedError
+from src.services.stt.manager import STTManager
+from src.services.summarizer.manager import SummarizerManager
+
+logger = logging.getLogger(__name__)
+
+
+async def process_voice_request(
+    message: Any,
+    bot: Any,
+    stt_manager: STTManager,
+    summarizer_manager: SummarizerManager,
+    cache: TranscriptCache,
+    max_file_size_mb: int = 20,
+) -> None:
+    """Orchestrate downloading, transcribing, and summarizing a voice/audio message."""
+    target = extract_voice_target(message)
+    if target is None:
+        await message.reply(
+            "🎙️ لطفاً یک ویس یا فایل صوتی بفرستید، یا روی ویس شخص دیگری ریپلای بزنید."
+        )
+        return
+
+    media, speaker_name = target
+    file_size = getattr(media, "file_size", 0) or 0
+    max_bytes = max_file_size_mb * 1024 * 1024
+    if file_size > max_bytes:
+        await message.reply(
+            f"⚠️ حجم فایل صوتی بیش از حد مجاز ({max_file_size_mb} مگابایت) است."
+        )
+        return
+
+    status_msg = await message.reply("📥 در حال دریافت ویس و آماده‌سازی...")
+    tmp_path: Path | None = None
+
+    try:
+        file_info = await bot.get_file(media.file_id)
+        suffix = Path(getattr(file_info, "file_path", "") or "voice.ogg").suffix or ".ogg"
+
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+
+        await bot.download_file(file_info.file_path, destination=tmp_path)
+
+        await status_msg.edit_text(
+            f"🎙️ در حال تبدیل ویس «{speaker_name}» به متن..."
+        )
+        stt_result = await stt_manager.transcribe(tmp_path)
+
+        await status_msg.edit_text(
+            f"🧠 در حال خلاصه‌سازی صحبت‌های «{speaker_name}»..."
+        )
+        summary_result = await summarizer_manager.summarize(
+            transcript=stt_result.text,
+            speaker_name=speaker_name,
+            language=stt_result.language,
+        )
+
+        cache_id = cache.put(speaker_name=speaker_name, text=stt_result.text)
+        keyboard = build_transcript_keyboard(
+            cache_id=cache_id, language=summary_result.language
+        )
+
+        await status_msg.edit_text(summary_result.summary, reply_markup=keyboard)
+
+    except FileTooLargeError:
+        await status_msg.edit_text(
+            f"⚠️ حجم فایل صوتی بیش از سقف مجاز ({max_file_size_mb} مگابایت) است."
+        )
+    except ProviderChainExhaustedError as exc:
+        logger.error("All providers failed during voice processing: %s", exc)
+        await status_msg.edit_text(
+            "❌ خطا در پردازش ویس: تمامی سرویس‌های هوش مصنوعی در حال حاضر با محدودیت مواجه شدند. لطفاً چند لحظه دیگر دوباره تلاش کنید."
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected error processing voice message: %s", exc)
+        await status_msg.edit_text(
+            "❌ متأسفانه خطایی هنگام پردازش ویس رخ داد. لطفاً دوباره امتحان کنید."
+        )
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError as unlink_err:
+                logger.warning("Failed to delete temp file %s: %s", tmp_path, unlink_err)
+
+
+async def handle_transcript_callback(
+    callback: Any, cache: TranscriptCache
+) -> None:
+    """Send the cached full transcript when the user clicks the inline button."""
+    data = getattr(callback, "data", "") or ""
+    cache_id = data.split(":", 1)[1] if ":" in data else ""
+    entry = cache.get(cache_id)
+
+    if entry is None:
+        await callback.answer(
+            "⏳ متن کامل این ویس از حافظه موقت منقضی شده است. لطفاً دوباره ویس را ارسال کنید.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer()
+    header = f"📜 متن کامل صحبت‌های {entry.speaker_name}:\n\n"
+    chunks = chunk_text(header + entry.text, max_len=4000)
+    msg = getattr(callback, "message", None)
+    if msg is not None:
+        for chunk in chunks:
+            await msg.reply(chunk)
+
+
+def create_bot_router(
+    stt_manager: STTManager,
+    summarizer_manager: SummarizerManager,
+    cache: TranscriptCache,
+    max_file_size_mb: int = 20,
+) -> Router:
+    """Create and wire the aiogram Router with all commands, voice handlers, and callbacks."""
+    router = Router(name="voice_summary_router")
+
+    @router.message(Command("start", "help"))
+    async def cmd_start(message: Message) -> None:
+        await message.reply(
+            "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس هستم.\n\n"
+            "✨ چطور از من استفاده کنی؟\n"
+            "۱. در چت خصوصی: هر ویس یا فایل صوتی را مستقیم برایم بفرست یا فوروارد کن.\n"
+            "۲. در گروه‌ها: روی هر ویسی ریپلای بزن و دستور /summary یا /خلاصه را بنویس.\n\n"
+            "من زبان ویس (فارسی یا انگلیسی) و نام گوینده را تشخیص می‌دهم و خلاصه‌ی دقیق صحبت‌هایش را به همراه متن کامل تحویلت می‌دهم!"
+        )
+
+    @router.message(Command("summary", "summarize", "خلاصه"))
+    async def cmd_summary(message: Message) -> None:
+        await process_voice_request(
+            message=message,
+            bot=message.bot,
+            stt_manager=stt_manager,
+            summarizer_manager=summarizer_manager,
+            cache=cache,
+            max_file_size_mb=max_file_size_mb,
+        )
+
+    @router.message(F.voice | F.audio)
+    async def on_voice_or_audio(message: Message) -> None:
+        await process_voice_request(
+            message=message,
+            bot=message.bot,
+            stt_manager=stt_manager,
+            summarizer_manager=summarizer_manager,
+            cache=cache,
+            max_file_size_mb=max_file_size_mb,
+        )
+
+    @router.callback_query(F.data.startswith("transcript:"))
+    async def on_transcript_button(callback: CallbackQuery) -> None:
+        await handle_transcript_callback(callback, cache)
+
+    return router

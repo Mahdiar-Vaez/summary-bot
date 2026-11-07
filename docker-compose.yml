@@ -1,0 +1,7 @@
+services:
+  voice-summary-bot:
+    build: .
+    container_name: telegram-voice-summary-bot
+    restart: unless-stopped
+    env_file:
+      - .env
