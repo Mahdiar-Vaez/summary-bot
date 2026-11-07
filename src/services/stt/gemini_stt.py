@@ -26,7 +26,7 @@ class GeminiAudioSTTProvider:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-3.5-flash",
         client: httpx.AsyncClient | None = None,
         timeout: float = 90.0,
     ) -> None:

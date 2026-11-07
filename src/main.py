@@ -22,13 +22,23 @@ from src.services.summarizer.manager import SummarizerManager
 from src.services.summarizer.openrouter_llm import OpenRouterSummarizerProvider
 
 
+GEMINI_FALLBACK_MODELS = (
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+)
+
+
 def build_stt_manager(settings: Settings) -> STTManager:
     """Build STTManager fallback chain from configured credentials."""
     providers: list[STTProvider] = []
     if settings.groq_api_key and settings.groq_api_key.strip():
         providers.append(GroqWhisperProvider(api_key=settings.groq_api_key.strip()))
     if settings.gemini_api_key and settings.gemini_api_key.strip():
-        providers.append(GeminiAudioSTTProvider(api_key=settings.gemini_api_key.strip()))
+        gkey = settings.gemini_api_key.strip()
+        for model_name in GEMINI_FALLBACK_MODELS:
+            providers.append(GeminiAudioSTTProvider(api_key=gkey, model=model_name))
     if (
         settings.cloudflare_account_id
         and settings.cloudflare_account_id.strip()
@@ -48,9 +58,9 @@ def build_summarizer_manager(settings: Settings) -> SummarizerManager:
     """Build SummarizerManager fallback chain from configured credentials."""
     providers: list[SummarizerProvider] = []
     if settings.gemini_api_key and settings.gemini_api_key.strip():
-        providers.append(
-            GeminiSummarizerProvider(api_key=settings.gemini_api_key.strip())
-        )
+        gkey = settings.gemini_api_key.strip()
+        for model_name in GEMINI_FALLBACK_MODELS:
+            providers.append(GeminiSummarizerProvider(api_key=gkey, model=model_name))
     if settings.groq_api_key and settings.groq_api_key.strip():
         providers.append(GroqSummarizerProvider(api_key=settings.groq_api_key.strip()))
     if settings.openrouter_api_key and settings.openrouter_api_key.strip():

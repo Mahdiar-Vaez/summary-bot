@@ -18,7 +18,7 @@ class GeminiSummarizerProvider:
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-3.5-flash",
         client: httpx.AsyncClient | None = None,
         timeout: float = 45.0,
     ) -> None:

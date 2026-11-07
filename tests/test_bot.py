@@ -4,7 +4,9 @@ import pytest
 from src.bot.cache import TranscriptCache, chunk_text
 from src.bot.extractors import extract_voice_target
 from src.bot.handlers import handle_transcript_callback, process_voice_request
+from src.config import Settings
 from src.exceptions import ProviderChainExhaustedError
+from src.main import build_stt_manager, build_summarizer_manager
 from src.services.stt.base import TranscriptionResult
 from src.services.summarizer.base import SummaryResult
 
@@ -197,3 +199,29 @@ async def test_handle_transcript_callback_expired_and_valid():
     await handle_transcript_callback(DummyCallback(), cache)
     assert answers[-1][1] is True
     assert "منقضی" in (answers[-1][0] or "")
+
+
+def test_build_managers_with_gemini_creates_multi_model_fallback_chain():
+    settings = Settings(
+        telegram_bot_token="123:ABC",
+        gemini_api_key="AQ.test_key",
+        _env_file=None,
+    )
+    stt_mgr = build_stt_manager(settings)
+    sum_mgr = build_summarizer_manager(settings)
+
+    stt_models = [getattr(p, "model", "") for p in stt_mgr.providers]
+    sum_models = [getattr(p, "model", "") for p in sum_mgr.providers]
+
+    assert stt_models == [
+        "gemini-3.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+    ]
+    assert sum_models == [
+        "gemini-3.5-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+    ]
