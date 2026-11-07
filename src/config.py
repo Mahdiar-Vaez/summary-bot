@@ -28,13 +28,14 @@ class Settings(BaseSettings):
     def has_any_stt_provider(self) -> bool:
         """Return True if at least one STT provider has valid credentials."""
         has_groq = bool(self.groq_api_key and self.groq_api_key.strip())
+        has_gemini = bool(self.gemini_api_key and self.gemini_api_key.strip())
         has_cf = bool(
             self.cloudflare_account_id
             and self.cloudflare_account_id.strip()
             and self.cloudflare_api_token
             and self.cloudflare_api_token.strip()
         )
-        return has_groq or has_cf
+        return has_groq or has_gemini or has_cf
 
     def has_any_llm_provider(self) -> bool:
         """Return True if at least one LLM summarizer provider has valid credentials."""

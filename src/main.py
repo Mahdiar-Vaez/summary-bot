@@ -12,6 +12,7 @@ from src.bot.handlers import create_bot_router
 from src.config import Settings
 from src.services.stt.base import STTProvider
 from src.services.stt.cloudflare_stt import CloudflareWhisperProvider
+from src.services.stt.gemini_stt import GeminiAudioSTTProvider
 from src.services.stt.groq_stt import GroqWhisperProvider
 from src.services.stt.manager import STTManager
 from src.services.summarizer.base import SummarizerProvider
@@ -26,6 +27,8 @@ def build_stt_manager(settings: Settings) -> STTManager:
     providers: list[STTProvider] = []
     if settings.groq_api_key and settings.groq_api_key.strip():
         providers.append(GroqWhisperProvider(api_key=settings.groq_api_key.strip()))
+    if settings.gemini_api_key and settings.gemini_api_key.strip():
+        providers.append(GeminiAudioSTTProvider(api_key=settings.gemini_api_key.strip()))
     if (
         settings.cloudflare_account_id
         and settings.cloudflare_account_id.strip()

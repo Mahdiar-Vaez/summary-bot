@@ -15,6 +15,16 @@ def test_settings_defaults_and_provider_checks():
     assert settings.has_any_llm_provider() is True
 
 
+def test_settings_with_only_gemini_key_has_stt_and_llm():
+    settings = Settings(
+        telegram_bot_token="123:ABC",
+        gemini_api_key="AIza_test",
+        _env_file=None,
+    )
+    assert settings.has_any_stt_provider() is True
+    assert settings.has_any_llm_provider() is True
+
+
 def test_settings_without_providers_reports_false():
     settings = Settings(
         telegram_bot_token="123:ABC",
