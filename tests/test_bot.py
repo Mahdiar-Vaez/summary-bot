@@ -246,6 +246,16 @@ def test_should_trigger_on_reply_detects_voice_replies_in_private_and_group():
         text="@vaez_summary_bot خلاصه کن",
         reply_to_message=replied_voice,
     )
+    group_username_without_at_reply = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        text="my_custom_bot",
+        reply_to_message=replied_voice,
+    )
+    group_bot_name_reply = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        text="voice-summary",
+        reply_to_message=replied_voice,
+    )
     group_keyword_reply = SimpleNamespace(
         chat=SimpleNamespace(type="group"),
         text="خلاصه",
@@ -257,10 +267,12 @@ def test_should_trigger_on_reply_detects_voice_replies_in_private_and_group():
         reply_to_message=replied_voice,
     )
 
-    assert should_trigger_on_reply(private_reply, bot_username="vaez_summary_bot") is True
+    assert should_trigger_on_reply(private_reply, bot_username="my_custom_bot") is True
     assert should_trigger_on_reply(group_mention_reply, bot_username="vaez_summary_bot") is True
-    assert should_trigger_on_reply(group_keyword_reply, bot_username="vaez_summary_bot") is True
-    assert should_trigger_on_reply(group_unrelated_reply, bot_username="vaez_summary_bot") is False
+    assert should_trigger_on_reply(group_username_without_at_reply, bot_username="my_custom_bot") is True
+    assert should_trigger_on_reply(group_bot_name_reply, bot_username="my_custom_bot") is True
+    assert should_trigger_on_reply(group_keyword_reply, bot_username="my_custom_bot") is True
+    assert should_trigger_on_reply(group_unrelated_reply, bot_username="my_custom_bot") is False
 
 
 @pytest.mark.asyncio

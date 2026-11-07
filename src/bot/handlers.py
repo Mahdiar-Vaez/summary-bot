@@ -31,7 +31,11 @@ _REPLY_TRIGGER_KEYWORDS = (
 )
 
 
-def should_trigger_on_reply(message: Any, bot_username: str | None = None) -> bool:
+def should_trigger_on_reply(
+    message: Any,
+    bot_username: str | None = None,
+    bot_first_name: str | None = None,
+) -> bool:
     """Return True if a reply message should trigger voice summarization."""
     replied = getattr(message, "reply_to_message", None)
     if replied is None:
@@ -48,8 +52,14 @@ def should_trigger_on_reply(message: Any, bot_username: str | None = None) -> bo
         return True
 
     text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").lower()
-    if bot_username and f"@{bot_username.lower()}" in text:
+    clean_username = (bot_username or "vaez_summary_bot").lstrip("@").strip().lower()
+    if clean_username and clean_username in text:
         return True
+
+    clean_first_name = (bot_first_name or "voice-summary").strip().lower()
+    if clean_first_name and clean_first_name in text:
+        return True
+
     return any(kw in text for kw in _REPLY_TRIGGER_KEYWORDS)
 
 
@@ -242,11 +252,20 @@ def create_bot_router(
             max_file_size_mb=max_file_size_mb,
         )
 
+    bot_identity: dict[str, str | None] = {"username": None, "first_name": None}
+
     @router.message(F.reply_to_message)
     async def on_reply_to_voice(message: Message) -> None:
-        me = await message.bot.get_me() if message.bot else None
-        username = getattr(me, "username", None)
-        if should_trigger_on_reply(message, bot_username=username):
+        if bot_identity["username"] is None and message.bot is not None:
+            me = await message.bot.get_me()
+            bot_identity["username"] = getattr(me, "username", None)
+            bot_identity["first_name"] = getattr(me, "first_name", None)
+
+        if should_trigger_on_reply(
+            message,
+            bot_username=bot_identity["username"],
+            bot_first_name=bot_identity["first_name"],
+        ):
             await process_voice_request(
                 message=message,
                 bot=message.bot,
