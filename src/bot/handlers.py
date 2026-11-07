@@ -88,7 +88,7 @@ async def process_voice_request(
         )
         return
 
-    status_msg = await message.reply("📥 در حال دریافت ویس و آماده‌سازی...")
+    status_msg = await message.reply(f"⏳ در حال خلاصه‌سازی ویس «{speaker_name}»...")
     tmp_path: Path | None = None
 
     try:
@@ -100,14 +100,8 @@ async def process_voice_request(
 
         await bot.download_file(file_info.file_path, destination=tmp_path)
 
-        await status_msg.edit_text(
-            f"🎙️ در حال تبدیل ویس «{speaker_name}» به متن..."
-        )
         stt_result = await stt_manager.transcribe(tmp_path)
 
-        await status_msg.edit_text(
-            f"🧠 در حال خلاصه‌سازی صحبت‌های «{speaker_name}»..."
-        )
         summary_result = await summarizer_manager.summarize(
             transcript=stt_result.text,
             speaker_name=speaker_name,

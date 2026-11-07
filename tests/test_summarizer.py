@@ -10,14 +10,16 @@ from src.services.summarizer.manager import SummarizerManager
 
 def test_build_summary_prompt_persian_has_header_only_and_forbids_name_in_body():
     system_prompt, user_prompt = build_summary_prompt(
-        transcript="سلام، فردا ساعت ده جلسه داریم و باید گزارش فروش آماده بشه.",
+        transcript="سلام، فردا ساعت ده با علی جلسه داریم و باید گزارش فروش آماده بشه.",
         speaker_name="mr.vaez",
         language="fa",
     )
     assert "📌 خلاصه صحبت‌های mr.vaez:" in system_prompt
     assert "در متن خلاصه به هیچ وجه نام گوینده" in system_prompt
-    assert "خیلی خلاصه و فشرده" in system_prompt
-    assert "نکات مهم و حساس" in system_prompt
+    assert "خیلی خیلی خلاصه و کوتاه" in system_prompt
+    assert "خودمونی و محاوره‌ای (نه کتابی و رسمی)" in system_prompt
+    assert "نام افراد" in system_prompt
+    assert "زمان کاری" in system_prompt
     assert "mr.vaez میگه که" not in system_prompt
 
 

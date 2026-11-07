@@ -78,6 +78,7 @@ def test_transcript_cache_and_chunking():
 
 @pytest.mark.asyncio
 async def test_process_voice_request_cleans_up_temp_file_and_edits_message():
+    initial_replies = []
     status_edits = []
     recorded_paths: list[Path] = []
 
@@ -93,6 +94,7 @@ async def test_process_voice_request_cleans_up_temp_file_and_edits_message():
         from_user = SimpleNamespace(full_name="مهدیار", first_name="مهدیار")
 
         async def reply(self, text: str):
+            initial_replies.append(text)
             return DummyStatusMsg()
 
     class DummyBot:
@@ -132,7 +134,10 @@ async def test_process_voice_request_cleans_up_temp_file_and_edits_message():
         max_file_size_mb=20,
     )
 
-    assert len(status_edits) >= 2
+    assert len(initial_replies) == 1
+    assert "در حال خلاصه‌سازی" in initial_replies[0]
+    assert "تبدیل ویس" not in initial_replies[0]
+    assert len(status_edits) == 1
     final_text, final_markup = status_edits[-1]
     assert "مهدیار میگه که" in final_text
     assert final_markup is not None
