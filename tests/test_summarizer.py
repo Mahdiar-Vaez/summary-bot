@@ -120,3 +120,22 @@ async def test_summarizer_manager_raises_when_all_fail():
     manager = SummarizerManager([groq])
     with pytest.raises(ProviderChainExhaustedError):
         await manager.summarize("متن تست", "مهدیار", "fa")
+
+
+def test_build_summary_prompt_for_chat_history_persian_and_english():
+    sys_fa, user_fa = build_summary_prompt(
+        transcript="[علی]: فردا ساعت ۱۰ جلسه داریم\n[مهدیار]: اوکی من گزارش رو میارم",
+        speaker_name="__CHAT_HISTORY__:100",
+        language="fa",
+    )
+    assert "📌 خلاصه 100 پیام آخر گفتگو:" in sys_fa
+    assert "خیلی خیلی خلاصه و کوتاه" in sys_fa
+    assert "همه مطالب" in sys_fa or "تمام مطالب" in sys_fa
+
+    sys_en, user_en = build_summary_prompt(
+        transcript="[Alex]: Meeting at 10am tomorrow\n[Sarah]: I will bring the report",
+        speaker_name="__CHAT_HISTORY__:50",
+        language="en",
+    )
+    assert "📌 Summary of Last 50 Messages:" in sys_en
+    assert "ultra-concise" in sys_en

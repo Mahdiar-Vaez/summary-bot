@@ -1,4 +1,4 @@
-"""Inline keyboards for Telegram voice summary messages."""
+"""Inline keyboards for Telegram voice and chat history summary messages."""
 
 from __future__ import annotations
 
@@ -47,3 +47,24 @@ def build_transcript_keyboard(
         return None
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_chat_summary_count_keyboard() -> InlineKeyboardMarkup:
+    """Create an inline keyboard allowing the user to pick how many recent messages (10..150) to summarize."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔟 ۱۰ پیام آخر", callback_data="chatsum:10"),
+                InlineKeyboardButton(text="3️⃣0️⃣ ۳۰ پیام آخر", callback_data="chatsum:30"),
+            ],
+            [
+                InlineKeyboardButton(text="5️⃣0️⃣ ۵۰ پیام آخر", callback_data="chatsum:50"),
+                InlineKeyboardButton(text="💯 ۱۰۰ پیام آخر", callback_data="chatsum:100"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔥 ۱۵۰ پیام آخر (حداکثر)", callback_data="chatsum:150"
+                ),
+            ],
+        ]
+    )

@@ -41,7 +41,22 @@ def _extract_speaker_from_message(msg: Any) -> str:
         if name:
             return str(name).strip()
 
+    sender_chat = getattr(msg, "sender_chat", None)
+    if sender_chat is not None:
+        title = getattr(sender_chat, "title", None)
+        if title:
+            return str(title).strip()
+
+    chat = getattr(msg, "chat", None)
+    if chat is not None and getattr(chat, "type", "") == "channel":
+        title = getattr(chat, "title", None)
+        if title:
+            return str(title).strip()
+
     return "گوینده"
+
+
+extract_speaker_name = _extract_speaker_from_message
 
 
 def extract_voice_target(message: Any) -> tuple[Any, str] | None:

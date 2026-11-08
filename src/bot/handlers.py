@@ -1,4 +1,4 @@
-"""Telegram bot handlers for voice/audio messages, replies, and inline callbacks."""
+"""Telegram bot handlers for voice/audio messages, chat history summaries, replies, and inline callbacks."""
 
 from __future__ import annotations
 
@@ -12,15 +12,21 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
-from src.bot.cache import TranscriptCache, chunk_text
-from src.bot.extractors import extract_voice_target
-from src.bot.keyboards import build_transcript_keyboard
+from src.bot.cache import MAX_CHAT_HISTORY_PER_CHAT, TranscriptCache, chunk_text
+from src.bot.extractors import extract_speaker_name, extract_voice_target
+from src.bot.keyboards import (
+    build_chat_summary_count_keyboard,
+    build_transcript_keyboard,
+)
 from src.exceptions import FileTooLargeError, ProviderChainExhaustedError
 from src.services.stt.manager import STTManager
 from src.services.summarizer.manager import SummarizerManager
+from src.services.summarizer.prompts import CHAT_HISTORY_SPEAKER_PREFIX
 from src.services.tts.manager import TTSManager
 
 logger = logging.getLogger(__name__)
+
+MAX_CHAT_SUMMARY_MESSAGES = MAX_CHAT_HISTORY_PER_CHAT
 
 _EXACT_TRIGGER_PHRASES = frozenset(
     {
@@ -44,7 +50,24 @@ _COMMAND_PREFIXES = (
     "/summary",
     "/summarize",
     "/خلاصه",
+    "/chat_summary",
+    "/messages",
+    "/history",
 )
+
+_PERSIAN_DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def _extract_requested_count(raw_text: str) -> int | None:
+    """Extract an optional message count (clamped to 1..150) from command or text."""
+    normalized = (raw_text or "").translate(_PERSIAN_DIGIT_MAP)
+    match = re.search(r"\b(\d{1,4})\b", normalized)
+    if not match:
+        return None
+    val = int(match.group(1))
+    if val <= 0:
+        return None
+    return min(val, MAX_CHAT_SUMMARY_MESSAGES)
 
 
 def _is_explicit_summary_text(
@@ -123,6 +146,30 @@ def should_trigger_on_reply(
     )
 
 
+def record_incoming_chat_message(message: Any, cache: TranscriptCache) -> None:
+    """Record non-command text/caption messages from a chat or channel into the rolling 150-message store."""
+    sender_user = getattr(message, "from_user", None)
+    if getattr(sender_user, "is_bot", False):
+        return
+
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        return
+
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    if not text or text.startswith("/"):
+        return
+
+    normalized = re.sub(r"[?؟!.،,\-_]+", " ", text.lower())
+    normalized = " ".join(normalized.split())
+    if normalized in _EXACT_TRIGGER_PHRASES:
+        return
+
+    speaker = extract_speaker_name(message)
+    cache.add_chat_message(chat_id=chat_id, sender=speaker, text=text)
+
+
 def _build_voice_dedup_key(message: Any, media: Any) -> str:
     """Build a per-chat deduplication key for a target voice/audio message."""
     chat = getattr(message, "chat", None)
@@ -149,7 +196,7 @@ async def process_voice_request(
     target = extract_voice_target(message)
     if target is None:
         await message.reply(
-            "🎙️ لطفاً یک ویس یا فایل صوتی بفرستید، یا روی ویس شخص دیگری ریپلای بزنید."
+            "🎙️ لطفاً یک ویس یا فایل صوتی بفرستید، یا روی ویس ریپلای بزنید (یا برای خلاصه پیام‌های گروه/کانال از دستور /chat_summary استفاده کنید)."
         )
         return
 
@@ -180,6 +227,15 @@ async def process_voice_request(
         await bot.download_file(file_info.file_path, destination=tmp_path)
 
         stt_result = await stt_manager.transcribe(tmp_path)
+
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(chat, "id", None)
+        if chat_id is not None and stt_result.text:
+            cache.add_chat_message(
+                chat_id=chat_id,
+                sender=f"{speaker_name} (ویس)",
+                text=stt_result.text,
+            )
 
         summary_result = await summarizer_manager.summarize(
             transcript=stt_result.text,
@@ -223,6 +279,124 @@ async def process_voice_request(
                 tmp_path.unlink()
             except OSError as unlink_err:
                 logger.warning("Failed to delete temp file %s: %s", tmp_path, unlink_err)
+
+
+async def _run_chat_history_summary(
+    chat_id: int | str,
+    requested_count: int,
+    status_updater: Any,
+    summarizer_manager: SummarizerManager,
+    cache: TranscriptCache,
+) -> None:
+    """Summarize the last `requested_count` (up to 150) messages for `chat_id` and update `status_updater`."""
+    clamped_count = max(1, min(int(requested_count), MAX_CHAT_SUMMARY_MESSAGES))
+    entries = cache.get_recent_chat_messages(chat_id, limit=clamped_count)
+    if not entries:
+        await status_updater.edit_text(
+            "📭 هنوز پیامی از این گفتگو در حافظه ربات ثبت نشده است.\n"
+            "💡 نکته: در گروه‌ها و کانال‌ها، ربات از لحظه‌ای که ادمین شود پیام‌های جدید را (تا سقف ۱۵۰ پیام آخر) ذخیره و خلاصه می‌کند.",
+            reply_markup=None,
+        )
+        return
+
+    actual_count = len(entries)
+    await status_updater.edit_text(
+        f"⏳ در حال خلاصه‌سازی {actual_count} پیام آخر گفتگو...",
+        reply_markup=None,
+    )
+
+    formatted_lines = [f"[{item.sender}]: {item.text}" for item in entries]
+    combined_transcript = "\n".join(formatted_lines)
+
+    try:
+        summary_result = await summarizer_manager.summarize(
+            transcript=combined_transcript,
+            speaker_name=f"{CHAT_HISTORY_SPEAKER_PREFIX}{actual_count}",
+            language="fa",
+        )
+        cache_id = cache.put(
+            speaker_name=f"{actual_count} پیام آخر",
+            text=combined_transcript,
+            summary=summary_result.summary,
+            language=summary_result.language,
+        )
+        entry = cache.get(cache_id)
+        if entry is not None:
+            entry.transcript_used = True
+        keyboard = build_transcript_keyboard(
+            cache_id=cache_id,
+            language=summary_result.language,
+            show_tts=True,
+            show_transcript=False,
+        )
+        await status_updater.edit_text(summary_result.summary, reply_markup=keyboard)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to summarize chat history: %s", exc)
+        await status_updater.edit_text(
+            "❌ متأسفانه در خلاصه‌سازی پیام‌های گفتگو خطایی رخ داد. لطفاً چند لحظه دیگر دوباره تلاش کنید.",
+            reply_markup=None,
+        )
+
+
+async def handle_chat_summary_command(
+    message: Any,
+    summarizer_manager: SummarizerManager,
+    cache: TranscriptCache,
+    requested_count: int | None = None,
+) -> None:
+    """Show the 10..150 message count selector or immediately summarize if a count was given."""
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", "private")
+    text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    count = requested_count if requested_count is not None else _extract_requested_count(text)
+
+    if count is None:
+        keyboard = build_chat_summary_count_keyboard()
+        await message.reply(
+            "📊 لطفاً انتخاب کنید **چند پیام آخر** گفتگو یا کانال خلاصه شود (حداکثر ۱۵۰ پیام):",
+            reply_markup=keyboard,
+        )
+        return
+
+    status_msg = await message.reply(
+        f"⏳ در حال آماده‌سازی خلاصه {min(count, MAX_CHAT_SUMMARY_MESSAGES)} پیام آخر..."
+    )
+    await _run_chat_history_summary(
+        chat_id=chat_id,
+        requested_count=count,
+        status_updater=status_msg,
+        summarizer_manager=summarizer_manager,
+        cache=cache,
+    )
+
+
+async def handle_chat_summary_callback(
+    callback: Any,
+    summarizer_manager: SummarizerManager,
+    cache: TranscriptCache,
+) -> None:
+    """Handle click on one of the `chatsum:<count>` inline buttons (10, 30, 50, 100, 150)."""
+    data = getattr(callback, "data", "") or ""
+    raw_count = data.split(":", 1)[1] if ":" in data else "50"
+    try:
+        count = max(1, min(int(raw_count), MAX_CHAT_SUMMARY_MESSAGES))
+    except ValueError:
+        count = 50
+
+    await callback.answer(f"⏳ خلاصه‌سازی {count} پیام آخر...")
+    msg = getattr(callback, "message", None)
+    if msg is None:
+        return
+
+    chat = getattr(msg, "chat", None)
+    chat_id = getattr(chat, "id", "private")
+    await _run_chat_history_summary(
+        chat_id=chat_id,
+        requested_count=count,
+        status_updater=msg,
+        summarizer_manager=summarizer_manager,
+        cache=cache,
+    )
 
 
 async def _update_message_buttons(
@@ -328,7 +502,7 @@ def create_bot_router(
     tts_manager: TTSManager | None = None,
     max_file_size_mb: int = 20,
 ) -> Router:
-    """Create and wire the aiogram Router with all commands, voice handlers, and callbacks."""
+    """Create and wire the aiogram Router with all commands, voice handlers, chat history, and callbacks."""
     router = Router(name="voice_summary_router")
     bot_identity: dict[str, str | None] = {"username": None, "first_name": None}
 
@@ -341,23 +515,39 @@ def create_bot_router(
     @router.message(Command("start", "help"))
     async def cmd_start(message: Message) -> None:
         await message.reply(
-            "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس هستم.\n\n"
-            "✨ چطور از من استفاده کنی؟\n"
-            "۱. در چت خصوصی: هر ویس یا فایل صوتی را مستقیم برایم بفرست یا فوروارد کن.\n"
-            "۲. در گروه‌ها: روی هر ویسی ریپلای بزن و بنویس خلاصه (یا دستور /summary یا منشن @vaez_summary_bot).\n\n"
-            "من زبان ویس (فارسی یا انگلیسی) و نام گوینده را تشخیص می‌دهم و خلاصه‌ی دقیق صحبت‌هایش را به صورت متنی و صوتی تحویلت می‌دهم!"
+            "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس و پیام‌های گروه و کانال هستم.\n\n"
+            "✨ قابلیت‌های من:\n"
+            "۱. 🎙️ **خلاصه‌سازی ویس در چت خصوصی:** هر ویس یا فایل صوتی را مستقیم برایم بفرست یا فوروارد کن.\n"
+            "۲. 👥 **خلاصه‌سازی ویس در گروه‌ها:** روی هر ویسی ریپلای بزن و بنویس `خلاصه` (یا دستور `/summary` یا منشن `@vaez_summary_bot`).\n"
+            "۳. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (۱۰ تا ۱۵۰ پیام آخر):** دستور `/chat_summary` را بزن و تعداد پیام‌ها (۱۰، ۳۰، ۵۰، ۱۰۰ یا ۱۵۰ پیام آخر) را انتخاب کن تا کل مباحث را خیلی کوتاه، خودمونی و کامل برایت خلاصه کنم!\n"
+            "۴. 🔊 **خلاصه صوتی:** زیر تمام خلاصه‌ها می‌توانی نسخه صوتی خلاصه را هم بشنوی."
+        )
+
+    @router.message(Command("chat_summary", "messages", "history"))
+    async def cmd_chat_summary(message: Message) -> None:
+        await handle_chat_summary_command(
+            message=message,
+            summarizer_manager=summarizer_manager,
+            cache=cache,
         )
 
     @router.message(Command("summary", "summarize", "خلاصه"))
     async def cmd_summary(message: Message) -> None:
-        await process_voice_request(
-            message=message,
-            bot=message.bot,
-            stt_manager=stt_manager,
-            summarizer_manager=summarizer_manager,
-            cache=cache,
-            max_file_size_mb=max_file_size_mb,
-        )
+        if extract_voice_target(message) is not None:
+            await process_voice_request(
+                message=message,
+                bot=message.bot,
+                stt_manager=stt_manager,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+                max_file_size_mb=max_file_size_mb,
+            )
+        else:
+            await handle_chat_summary_command(
+                message=message,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+            )
 
     @router.message(F.voice | F.audio)
     async def on_voice_or_audio(message: Message) -> None:
@@ -378,6 +568,7 @@ def create_bot_router(
 
     @router.message(F.reply_to_message)
     async def on_reply_to_voice(message: Message) -> None:
+        record_incoming_chat_message(message, cache)
         await _ensure_bot_identity(message)
         if should_trigger_on_reply(
             message,
@@ -392,6 +583,38 @@ def create_bot_router(
                 cache=cache,
                 max_file_size_mb=max_file_size_mb,
             )
+
+    @router.channel_post()
+    async def on_channel_post(message: Message) -> None:
+        text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+        if text.startswith(("/chat_summary", "/summary", "/خلاصه")):
+            await handle_chat_summary_command(
+                message=message,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+            )
+            return
+        record_incoming_chat_message(message, cache)
+
+    @router.message()
+    async def on_any_chat_message(message: Message) -> None:
+        text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+        lowered = text.lower()
+        if any(
+            phrase in lowered
+            for phrase in ("خلاصه پیام", "خلاصه چت", "خلاصه گروه", "خلاصه چنل", "خلاصه کانال")
+        ):
+            await handle_chat_summary_command(
+                message=message,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+            )
+            return
+        record_incoming_chat_message(message, cache)
+
+    @router.callback_query(F.data.startswith("chatsum:"))
+    async def on_chat_summary_button(callback: CallbackQuery) -> None:
+        await handle_chat_summary_callback(callback, summarizer_manager, cache)
 
     @router.callback_query(F.data.startswith("transcript:"))
     async def on_transcript_button(callback: CallbackQuery) -> None:

@@ -4,10 +4,14 @@ import pytest
 from src.bot.cache import TranscriptCache, chunk_text
 from src.bot.extractors import extract_voice_target
 from src.bot.handlers import (
+    MAX_CHAT_SUMMARY_MESSAGES,
     create_bot_router,
+    handle_chat_summary_callback,
+    handle_chat_summary_command,
     handle_transcript_callback,
     handle_tts_callback,
     process_voice_request,
+    record_incoming_chat_message,
     should_trigger_on_reply,
     should_trigger_on_voice_message,
 )
@@ -464,3 +468,98 @@ async def test_handle_tts_and_transcript_callbacks_disable_buttons_after_click()
     # 4. Clicking Transcript button again should NOT send transcript again
     await handle_transcript_callback(DummyCallback("transcript", cid, shared_msg), cache)
     assert len(sent_transcripts) == 1
+
+
+def test_chat_history_store_caps_at_150_messages_and_ignores_commands():
+    assert MAX_CHAT_SUMMARY_MESSAGES == 150
+    cache = TranscriptCache()
+    chat_id = -100123456
+
+    for i in range(1, 181):
+        msg = SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id, type="supergroup"),
+            from_user=SimpleNamespace(full_name=f"User{i}", first_name=f"User{i}", is_bot=False),
+            text=f"پیام شماره {i} درباره پروژه",
+            caption=None,
+        )
+        record_incoming_chat_message(msg, cache)
+
+    # Commands should not be recorded
+    cmd_msg = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type="supergroup"),
+        from_user=SimpleNamespace(full_name="Admin", first_name="Admin", is_bot=False),
+        text="/chat_summary 100",
+        caption=None,
+    )
+    record_incoming_chat_message(cmd_msg, cache)
+
+    recent_all = cache.get_recent_chat_messages(chat_id, limit=200)
+    assert len(recent_all) == 150
+    assert recent_all[0].text == "پیام شماره 31 درباره پروژه"
+    assert recent_all[-1].text == "پیام شماره 180 درباره پروژه"
+
+
+@pytest.mark.asyncio
+async def test_chat_summary_menu_and_callback_flow():
+    replies = []
+    edits = []
+
+    class DummyReplyMsg:
+        async def edit_text(self, text: str, reply_markup=None):
+            edits.append((text, reply_markup))
+
+    class DummyIncomingMsg:
+        chat = SimpleNamespace(id=-100555, type="supergroup")
+        text = "/chat_summary"
+        from_user = SimpleNamespace(full_name="مهدیار", first_name="مهدیار", is_bot=False)
+
+        async def reply(self, text: str, reply_markup=None):
+            replies.append((text, reply_markup))
+            return DummyReplyMsg()
+
+    class DummySummarizer:
+        async def summarize(self, transcript: str, speaker_name: str, language: str) -> SummaryResult:
+            assert speaker_name.startswith("__CHAT_HISTORY__:")
+            return SummaryResult(
+                summary="📌 خلاصه 3 پیام آخر گفتگو:\n• هماهنگی جلسه فردا ساعت ۱۰ صبح با علی",
+                language="fa",
+                provider="gemini",
+            )
+
+    cache = TranscriptCache()
+    cache.add_chat_message(-100555, "علی", "سلام بچه‌ها فردا ساعت ۱۰ صبح جلسه داریم")
+    cache.add_chat_message(-100555, "رضا", "گزارش مالی رو هم بیارید")
+    cache.add_chat_message(-100555, "مهدیار", "حله من آماده می‌کنم")
+
+    # 1. Calling /chat_summary without number shows interactive count selection keyboard (10..150)
+    await handle_chat_summary_command(DummyIncomingMsg(), DummySummarizer(), cache)
+    assert len(replies) == 1
+    menu_text, menu_markup = replies[0]
+    assert "چند پیام آخر" in menu_text
+    callback_values = [
+        btn.callback_data
+        for row in menu_markup.inline_keyboard
+        for btn in row
+    ]
+    assert "chatsum:10" in callback_values
+    assert "chatsum:100" in callback_values
+    assert "chatsum:150" in callback_values
+
+    # 2. Clicking one of the count buttons (e.g. chatsum:100) summarizes the messages and replaces the menu
+    class DummyCallback:
+        data = "chatsum:100"
+        message = SimpleNamespace(
+            chat=SimpleNamespace(id=-100555, type="supergroup"),
+            edit_text=DummyReplyMsg().edit_text,
+        )
+
+        async def answer(self, text: str | None = None, show_alert: bool = False):
+            pass
+
+    await handle_chat_summary_callback(DummyCallback(), DummySummarizer(), cache)
+    assert len(edits) >= 2
+    assert "در حال خلاصه‌سازی" in edits[0][0]
+    assert edits[0][1] is None  # selection buttons disabled immediately!
+    final_text, final_markup = edits[-1]
+    assert "📌 خلاصه" in final_text
+    assert final_markup is not None  # has TTS audio summary button!
