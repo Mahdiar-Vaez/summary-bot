@@ -9,6 +9,7 @@ from src.bot.handlers import (
     handle_tts_callback,
     process_voice_request,
     should_trigger_on_reply,
+    should_trigger_on_voice_message,
 )
 from src.config import Settings
 from src.exceptions import ProviderChainExhaustedError
@@ -271,30 +272,160 @@ def test_should_trigger_on_reply_detects_voice_replies_in_private_and_group():
         text="باشه مرسی",
         reply_to_message=replied_voice,
     )
+    group_conversational_sentence_with_kholase = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        text="دمت گرم بابت این خلاصه خیلی خوب بود و به کارم اومد",
+        reply_to_message=replied_voice,
+    )
+    private_unrelated_reply = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        text="مرسی دستت درد نکنه",
+        reply_to_message=replied_voice,
+    )
+    bot_own_reply = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        text="خلاصه",
+        from_user=SimpleNamespace(is_bot=True),
+        reply_to_message=replied_voice,
+    )
+    slash_command_with_bot_username = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        text="/summary@vaez_summary_bot",
+        reply_to_message=replied_voice,
+    )
 
     assert should_trigger_on_reply(private_reply, bot_username="my_custom_bot") is True
     assert should_trigger_on_reply(group_mention_reply, bot_username="vaez_summary_bot") is True
     assert should_trigger_on_reply(group_username_without_at_reply, bot_username="my_custom_bot") is True
     assert should_trigger_on_reply(group_bot_name_reply, bot_username="my_custom_bot") is True
     assert should_trigger_on_reply(group_keyword_reply, bot_username="my_custom_bot") is True
+    assert should_trigger_on_reply(slash_command_with_bot_username, bot_username="vaez_summary_bot") is True
     assert should_trigger_on_reply(group_unrelated_reply, bot_username="my_custom_bot") is False
+    assert should_trigger_on_reply(group_conversational_sentence_with_kholase, bot_username="my_custom_bot") is False
+    assert should_trigger_on_reply(private_unrelated_reply, bot_username="my_custom_bot") is False
+    assert should_trigger_on_reply(bot_own_reply, bot_username="my_custom_bot") is False
+
+
+def test_should_trigger_on_voice_message_private_vs_group():
+    private_voice = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        voice=SimpleNamespace(file_id="v1"),
+        caption=None,
+    )
+    group_plain_voice = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        voice=SimpleNamespace(file_id="v2"),
+        caption=None,
+    )
+    group_mentioned_voice = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        voice=SimpleNamespace(file_id="v3"),
+        caption="@vaez_summary_bot خلاصه",
+    )
+
+    assert should_trigger_on_voice_message(private_voice, bot_username="vaez_summary_bot") is True
+    assert should_trigger_on_voice_message(group_plain_voice, bot_username="vaez_summary_bot") is False
+    assert should_trigger_on_voice_message(group_mentioned_voice, bot_username="vaez_summary_bot") is True
 
 
 @pytest.mark.asyncio
-async def test_handle_tts_callback_sends_voice_reply():
+async def test_process_voice_request_deduplicates_same_voice_in_group():
+    initial_replies = []
+    status_edits = []
+
+    class DummyStatusMsg:
+        async def edit_text(self, text: str, reply_markup=None):
+            status_edits.append((text, reply_markup))
+
+    replied_voice_msg = SimpleNamespace(
+        message_id=777,
+        voice=SimpleNamespace(
+            file_id="voice_group_1",
+            file_unique_id="uniq_group_1",
+            file_size=50_000,
+            duration=30,
+        ),
+        audio=None,
+        forward_origin=None,
+        from_user=SimpleNamespace(full_name="مهدیار", first_name="مهدیار"),
+    )
+
+    class DummyGroupReplyMessage:
+        chat = SimpleNamespace(id=-100999888, type="supergroup")
+        message_id = 778
+        voice = None
+        audio = None
+        reply_to_message = replied_voice_msg
+        forward_origin = None
+        from_user = SimpleNamespace(full_name="کاربر ۱", first_name="کاربر")
+
+        async def reply(self, text: str):
+            initial_replies.append(text)
+            return DummyStatusMsg()
+
+    class DummyBot:
+        async def get_file(self, file_id: str):
+            return SimpleNamespace(file_path="voice/file_g1.oga")
+
+        async def download_file(self, file_path: str, destination: Path):
+            Path(destination).write_bytes(b"OggS-voice-content")
+
+    class DummySTT:
+        async def transcribe(self, audio_path: Path) -> TranscriptionResult:
+            return TranscriptionResult(text="متن تست گروه", language="fa", provider="gemini")
+
+    class DummySummarizer:
+        async def summarize(self, transcript: str, speaker_name: str, language: str) -> SummaryResult:
+            return SummaryResult(summary="📌 خلاصه صحبت‌های مهدیار:\nتست", language="fa", provider="gemini")
+
+    cache = TranscriptCache()
+    msg1 = DummyGroupReplyMessage()
+    msg2 = DummyGroupReplyMessage()
+
+    await process_voice_request(
+        message=msg1,
+        bot=DummyBot(),
+        stt_manager=DummySTT(),
+        summarizer_manager=DummySummarizer(),
+        cache=cache,
+    )
+    # Second request for the exact same voice in the same group should be ignored
+    await process_voice_request(
+        message=msg2,
+        bot=DummyBot(),
+        stt_manager=DummySTT(),
+        summarizer_manager=DummySummarizer(),
+        cache=cache,
+    )
+
+    assert len(initial_replies) == 1
+    assert len(status_edits) == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_tts_and_transcript_callbacks_disable_buttons_after_click():
     sent_voices = []
+    sent_transcripts = []
+    edited_markups = []
+    callback_answers = []
 
     class DummyMsg:
         async def reply_voice(self, voice, caption=None):
             sent_voices.append((voice, caption))
 
+        async def reply(self, text: str):
+            sent_transcripts.append(text)
+
+        async def edit_reply_markup(self, reply_markup=None):
+            edited_markups.append(reply_markup)
+
     class DummyCallback:
-        def __init__(self, cid: str):
-            self.data = f"tts:{cid}"
-            self.message = DummyMsg()
+        def __init__(self, prefix: str, cid: str, msg: DummyMsg):
+            self.data = f"{prefix}:{cid}"
+            self.message = msg
 
         async def answer(self, text: str | None = None, show_alert: bool = False):
-            pass
+            callback_answers.append((text, show_alert))
 
     class DummyTTS:
         async def synthesize(self, text: str, language: str) -> TTSResult:
@@ -307,6 +438,29 @@ async def test_handle_tts_callback_sends_voice_reply():
         summary="📌 خلاصه صحبت‌های mr.vaez:\nجلسه فردا برگزار می‌شود.",
         language="fa",
     )
-    await handle_tts_callback(DummyCallback(cid), cache, DummyTTS())
+    shared_msg = DummyMsg()
+
+    # 1. Click TTS button -> sends voice, removes TTS button (leaves transcript button)
+    await handle_tts_callback(DummyCallback("tts", cid, shared_msg), cache, DummyTTS())
     assert len(sent_voices) == 1
     assert "mr.vaez" in (sent_voices[0][1] or "")
+    assert len(edited_markups) == 1
+    remaining_buttons = [
+        btn.callback_data
+        for row in edited_markups[-1].inline_keyboard
+        for btn in row
+    ]
+    assert remaining_buttons == [f"transcript:{cid}"]
+
+    # 2. Clicking TTS button again should NOT synthesize or send voice again
+    await handle_tts_callback(DummyCallback("tts", cid, shared_msg), cache, DummyTTS())
+    assert len(sent_voices) == 1
+
+    # 3. Click Transcript button -> sends transcript, removes last button (reply_markup becomes None)
+    await handle_transcript_callback(DummyCallback("transcript", cid, shared_msg), cache)
+    assert len(sent_transcripts) == 1
+    assert edited_markups[-1] is None
+
+    # 4. Clicking Transcript button again should NOT send transcript again
+    await handle_transcript_callback(DummyCallback("transcript", cid, shared_msg), cache)
+    assert len(sent_transcripts) == 1

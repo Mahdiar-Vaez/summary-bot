@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -21,14 +22,80 @@ from src.services.tts.manager import TTSManager
 
 logger = logging.getLogger(__name__)
 
-_REPLY_TRIGGER_KEYWORDS = (
-    "خلاصه",
-    "چی میگه",
-    "چی گفت",
-    "summary",
-    "summarize",
-    "tldr",
+_EXACT_TRIGGER_PHRASES = frozenset(
+    {
+        "خلاصه",
+        "خلاصه کن",
+        "خلاصش کن",
+        "خلاصه لطفا",
+        "خلاصه لطفاً",
+        "چی میگه",
+        "چی گفت",
+        "چی میگه تو ویس",
+        "چی گفت تو ویس",
+        "summary",
+        "summarize",
+        "tldr",
+        "tl;dr",
+    }
 )
+
+_COMMAND_PREFIXES = (
+    "/summary",
+    "/summarize",
+    "/خلاصه",
+)
+
+
+def _is_explicit_summary_text(
+    raw_text: str,
+    bot_username: str | None = None,
+    bot_first_name: str | None = None,
+) -> bool:
+    """Return True only when text explicitly mentions the bot or is a direct summary command/phrase."""
+    text = (raw_text or "").strip().lower()
+    if not text:
+        return False
+
+    first_token = text.split()[0]
+    if any(
+        first_token == cmd or first_token.startswith(f"{cmd}@")
+        for cmd in _COMMAND_PREFIXES
+    ):
+        return True
+
+    clean_username = (bot_username or "vaez_summary_bot").lstrip("@").strip().lower()
+    if clean_username and clean_username in text:
+        return True
+
+    clean_first_name = (bot_first_name or "voice-summary").strip().lower()
+    if clean_first_name and clean_first_name in text:
+        return True
+
+    normalized = re.sub(r"[?؟!.،,\-_]+", " ", text)
+    normalized = " ".join(normalized.split())
+    return normalized in _EXACT_TRIGGER_PHRASES
+
+
+def should_trigger_on_voice_message(
+    message: Any,
+    bot_username: str | None = None,
+    bot_first_name: str | None = None,
+) -> bool:
+    """Return True if a direct voice/audio message should auto-summarize."""
+    sender = getattr(message, "from_user", None)
+    if getattr(sender, "is_bot", False):
+        return False
+
+    chat = getattr(message, "chat", None)
+    chat_type = getattr(chat, "type", "private")
+    if chat_type == "private":
+        return True
+
+    caption = getattr(message, "caption", None) or getattr(message, "text", None) or ""
+    return _is_explicit_summary_text(
+        caption, bot_username=bot_username, bot_first_name=bot_first_name
+    )
 
 
 def should_trigger_on_reply(
@@ -37,6 +104,10 @@ def should_trigger_on_reply(
     bot_first_name: str | None = None,
 ) -> bool:
     """Return True if a reply message should trigger voice summarization."""
+    sender = getattr(message, "from_user", None)
+    if getattr(sender, "is_bot", False):
+        return False
+
     replied = getattr(message, "reply_to_message", None)
     if replied is None:
         return False
@@ -46,21 +117,24 @@ def should_trigger_on_reply(
     if not has_media:
         return False
 
+    text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    return _is_explicit_summary_text(
+        text, bot_username=bot_username, bot_first_name=bot_first_name
+    )
+
+
+def _build_voice_dedup_key(message: Any, media: Any) -> str:
+    """Build a per-chat deduplication key for a target voice/audio message."""
     chat = getattr(message, "chat", None)
-    chat_type = getattr(chat, "type", "private")
-    if chat_type == "private":
-        return True
-
-    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").lower()
-    clean_username = (bot_username or "vaez_summary_bot").lstrip("@").strip().lower()
-    if clean_username and clean_username in text:
-        return True
-
-    clean_first_name = (bot_first_name or "voice-summary").strip().lower()
-    if clean_first_name and clean_first_name in text:
-        return True
-
-    return any(kw in text for kw in _REPLY_TRIGGER_KEYWORDS)
+    chat_id = getattr(chat, "id", None)
+    file_uid = (
+        getattr(media, "file_unique_id", None)
+        or getattr(media, "file_id", None)
+        or ""
+    )
+    if not file_uid:
+        return ""
+    return f"{chat_id if chat_id is not None else 'private'}:{file_uid}"
 
 
 async def process_voice_request(
@@ -86,6 +160,11 @@ async def process_voice_request(
         await message.reply(
             f"⚠️ حجم فایل صوتی بیش از حد مجاز ({max_file_size_mb} مگابایت) است."
         )
+        return
+
+    voice_key = _build_voice_dedup_key(message, media)
+    if not cache.try_acquire_voice(voice_key):
+        logger.info("Skipping duplicate/in-flight summary request for voice_key=%s", voice_key)
         return
 
     status_msg = await message.reply(f"⏳ در حال خلاصه‌سازی ویس «{speaker_name}»...")
@@ -119,17 +198,21 @@ async def process_voice_request(
         )
 
         await status_msg.edit_text(summary_result.summary, reply_markup=keyboard)
+        cache.mark_voice_completed(voice_key)
 
     except FileTooLargeError:
+        cache.release_voice(voice_key)
         await status_msg.edit_text(
             f"⚠️ حجم فایل صوتی بیش از سقف مجاز ({max_file_size_mb} مگابایت) است."
         )
     except ProviderChainExhaustedError as exc:
+        cache.release_voice(voice_key)
         logger.error("All providers failed during voice processing: %s", exc)
         await status_msg.edit_text(
             "❌ خطا در پردازش ویس: تمامی سرویس‌های هوش مصنوعی در حال حاضر با محدودیت مواجه شدند. لطفاً چند لحظه دیگر دوباره تلاش کنید."
         )
     except Exception as exc:  # noqa: BLE001
+        cache.release_voice(voice_key)
         logger.exception("Unexpected error processing voice message: %s", exc)
         await status_msg.edit_text(
             "❌ متأسفانه خطایی هنگام پردازش ویس رخ داد. لطفاً دوباره امتحان کنید."
@@ -142,10 +225,28 @@ async def process_voice_request(
                 logger.warning("Failed to delete temp file %s: %s", tmp_path, unlink_err)
 
 
+async def _update_message_buttons(
+    msg: Any, cache_id: str, entry: Any
+) -> None:
+    """Update the inline keyboard on the summary message to remove already-clicked buttons."""
+    if msg is None or not hasattr(msg, "edit_reply_markup"):
+        return
+    updated_markup = build_transcript_keyboard(
+        cache_id=cache_id,
+        language=entry.language,
+        show_tts=not entry.tts_used,
+        show_transcript=not entry.transcript_used,
+    )
+    try:
+        await msg.edit_reply_markup(reply_markup=updated_markup)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not update inline reply markup for %s: %s", cache_id, exc)
+
+
 async def handle_transcript_callback(
     callback: Any, cache: TranscriptCache
 ) -> None:
-    """Send the cached full transcript when the user clicks the inline button."""
+    """Send the cached full transcript once and disable the transcript button."""
     data = getattr(callback, "data", "") or ""
     cache_id = data.split(":", 1)[1] if ":" in data else ""
     entry = cache.get(cache_id)
@@ -157,10 +258,17 @@ async def handle_transcript_callback(
         )
         return
 
+    if entry.transcript_used:
+        await callback.answer("📜 متن کامل این ویس قبلاً ارسال شده است.", show_alert=False)
+        return
+
+    entry.transcript_used = True
+    msg = getattr(callback, "message", None)
+    await _update_message_buttons(msg, cache_id, entry)
     await callback.answer()
+
     header = f"📜 متن کامل صحبت‌های {entry.speaker_name}:\n\n"
     chunks = chunk_text(header + entry.text, max_len=4000)
-    msg = getattr(callback, "message", None)
     if msg is not None:
         for chunk in chunks:
             await msg.reply(chunk)
@@ -169,7 +277,7 @@ async def handle_transcript_callback(
 async def handle_tts_callback(
     callback: Any, cache: TranscriptCache, tts_manager: TTSManager
 ) -> None:
-    """Synthesize and send the voice summary when the user clicks the audio summary button."""
+    """Synthesize and send the voice summary once and disable the audio summary button."""
     data = getattr(callback, "data", "") or ""
     cache_id = data.split(":", 1)[1] if ":" in data else ""
     entry = cache.get(cache_id)
@@ -181,8 +289,15 @@ async def handle_tts_callback(
         )
         return
 
-    await callback.answer("🔊 در حال تولید فایل صوتی خلاصه...")
+    if entry.tts_used:
+        await callback.answer("🔊 نسخه صوتی خلاصه قبلاً ارسال شده است.", show_alert=False)
+        return
+
+    entry.tts_used = True
     msg = getattr(callback, "message", None)
+    await _update_message_buttons(msg, cache_id, entry)
+    await callback.answer("🔊 در حال تولید فایل صوتی خلاصه...")
+
     if msg is None:
         return
 
@@ -200,6 +315,8 @@ async def handle_tts_callback(
         )
         await msg.reply_voice(voice=audio_file, caption=caption)
     except Exception as exc:  # noqa: BLE001
+        entry.tts_used = False
+        await _update_message_buttons(msg, cache_id, entry)
         logger.error("Failed to generate TTS audio summary: %s", exc)
         await msg.reply("❌ متأسفانه در تولید فایل صوتی خلاصه خطایی رخ داد.")
 
@@ -213,6 +330,13 @@ def create_bot_router(
 ) -> Router:
     """Create and wire the aiogram Router with all commands, voice handlers, and callbacks."""
     router = Router(name="voice_summary_router")
+    bot_identity: dict[str, str | None] = {"username": None, "first_name": None}
+
+    async def _ensure_bot_identity(message: Message) -> None:
+        if bot_identity["username"] is None and message.bot is not None:
+            me = await message.bot.get_me()
+            bot_identity["username"] = getattr(me, "username", None)
+            bot_identity["first_name"] = getattr(me, "first_name", None)
 
     @router.message(Command("start", "help"))
     async def cmd_start(message: Message) -> None:
@@ -220,7 +344,7 @@ def create_bot_router(
             "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس هستم.\n\n"
             "✨ چطور از من استفاده کنی؟\n"
             "۱. در چت خصوصی: هر ویس یا فایل صوتی را مستقیم برایم بفرست یا فوروارد کن.\n"
-            "۲. در گروه‌ها: روی هر ویسی ریپلای بزن و بنویس خلاصه (یا دستور /summary).\n\n"
+            "۲. در گروه‌ها: روی هر ویسی ریپلای بزن و بنویس خلاصه (یا دستور /summary یا منشن @vaez_summary_bot).\n\n"
             "من زبان ویس (فارسی یا انگلیسی) و نام گوینده را تشخیص می‌دهم و خلاصه‌ی دقیق صحبت‌هایش را به صورت متنی و صوتی تحویلت می‌دهم!"
         )
 
@@ -237,24 +361,24 @@ def create_bot_router(
 
     @router.message(F.voice | F.audio)
     async def on_voice_or_audio(message: Message) -> None:
-        await process_voice_request(
-            message=message,
-            bot=message.bot,
-            stt_manager=stt_manager,
-            summarizer_manager=summarizer_manager,
-            cache=cache,
-            max_file_size_mb=max_file_size_mb,
-        )
-
-    bot_identity: dict[str, str | None] = {"username": None, "first_name": None}
+        await _ensure_bot_identity(message)
+        if should_trigger_on_voice_message(
+            message,
+            bot_username=bot_identity["username"],
+            bot_first_name=bot_identity["first_name"],
+        ):
+            await process_voice_request(
+                message=message,
+                bot=message.bot,
+                stt_manager=stt_manager,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+                max_file_size_mb=max_file_size_mb,
+            )
 
     @router.message(F.reply_to_message)
     async def on_reply_to_voice(message: Message) -> None:
-        if bot_identity["username"] is None and message.bot is not None:
-            me = await message.bot.get_me()
-            bot_identity["username"] = getattr(me, "username", None)
-            bot_identity["first_name"] = getattr(me, "first_name", None)
-
+        await _ensure_bot_identity(message)
         if should_trigger_on_reply(
             message,
             bot_username=bot_identity["username"],
