@@ -1,8 +1,13 @@
-"""Inline keyboards for Telegram voice and chat history summary messages."""
+"""Inline and bottom-input keyboards for Telegram voice and chat history summary messages."""
 
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 
 def build_transcript_keyboard(
@@ -49,8 +54,31 @@ def build_transcript_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def build_chat_summary_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Create a bottom input-bar ReplyKeyboardMarkup for selecting 10..150 recent messages."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📊 خلاصه ۱۰ پیام آخر"),
+                KeyboardButton(text="📊 خلاصه ۳۰ پیام آخر"),
+            ],
+            [
+                KeyboardButton(text="📊 خلاصه ۵۰ پیام آخر"),
+                KeyboardButton(text="📊 خلاصه ۱۰۰ پیام آخر"),
+            ],
+            [
+                KeyboardButton(text="🔥 خلاصه ۱۵۰ پیام آخر"),
+            ],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        selective=True,
+        input_field_placeholder="تعداد پیام‌ها را از پایین انتخاب کنید...",
+    )
+
+
 def build_chat_summary_count_keyboard() -> InlineKeyboardMarkup:
-    """Create an inline keyboard allowing the user to pick how many recent messages (10..150) to summarize."""
+    """Fallback inline keyboard for selecting 10..150 recent messages."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [

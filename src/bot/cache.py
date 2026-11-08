@@ -1,11 +1,16 @@
-"""Bounded TTL in-memory cache for storing full voice transcripts, summaries, and chat history."""
+"""Bounded TTL cache for storing full voice transcripts, summaries, and persistent chat history."""
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 MAX_CHAT_HISTORY_PER_CHAT = 150
 
@@ -40,14 +45,69 @@ class TranscriptCache:
         ttl_seconds: int = 3600,
         max_items: int = 500,
         max_messages_per_chat: int = MAX_CHAT_HISTORY_PER_CHAT,
+        persistence_path: Path | str | None = None,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self.max_items = max_items
         self.max_messages_per_chat = max_messages_per_chat
+        self.persistence_path = Path(persistence_path) if persistence_path else None
         self._store: OrderedDict[str, TranscriptEntry] = OrderedDict()
         self._inflight: set[str] = set()
         self._completed_voices: OrderedDict[str, float] = OrderedDict()
         self._chat_history: OrderedDict[str, deque[ChatMessageEntry]] = OrderedDict()
+        self._prompt_message_ids: dict[str, int] = {}
+        self._load_chat_history()
+
+    def _load_chat_history(self) -> None:
+        if self.persistence_path is None or not self.persistence_path.exists():
+            return
+        try:
+            raw = json.loads(self.persistence_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return
+            now = time.monotonic()
+            for chat_key, items in raw.items():
+                if not isinstance(items, list):
+                    continue
+                q: deque[ChatMessageEntry] = deque(maxlen=self.max_messages_per_chat)
+                for item in items[-self.max_messages_per_chat :]:
+                    if isinstance(item, dict) and item.get("text"):
+                        q.append(
+                            ChatMessageEntry(
+                                sender=str(item.get("sender") or "کاربر"),
+                                text=str(item["text"]),
+                                created_at=now,
+                            )
+                        )
+                if q:
+                    self._chat_history[str(chat_key)] = q
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load persisted chat history: %s", exc)
+
+    def _save_chat_history(self) -> None:
+        if self.persistence_path is None:
+            return
+        try:
+            self.persistence_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                chat_key: [
+                    {"sender": entry.sender, "text": entry.text}
+                    for entry in entries
+                ]
+                for chat_key, entries in self._chat_history.items()
+            }
+            self.persistence_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to save chat history: %s", exc)
+
+    def set_prompt_message_id(self, chat_id: int | str, message_id: int | None) -> None:
+        if message_id is not None:
+            self._prompt_message_ids[str(chat_id)] = int(message_id)
+
+    def pop_prompt_message_id(self, chat_id: int | str) -> int | None:
+        return self._prompt_message_ids.pop(str(chat_id), None)
 
     def _evict_expired(self) -> None:
         now = time.monotonic()
@@ -80,13 +140,18 @@ class TranscriptCache:
         else:
             self._chat_history.move_to_end(key)
 
-        self._chat_history[key].append(
+        q = self._chat_history[key]
+        if q and q[-1].text == cleaned and q[-1].sender == (sender or "کاربر").strip():
+            return
+
+        q.append(
             ChatMessageEntry(
                 sender=(sender or "کاربر").strip(),
                 text=cleaned,
                 created_at=time.monotonic(),
             )
         )
+        self._save_chat_history()
 
     def get_recent_chat_messages(
         self, chat_id: int | str, limit: int = MAX_CHAT_HISTORY_PER_CHAT

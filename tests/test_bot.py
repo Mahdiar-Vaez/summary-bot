@@ -500,22 +500,32 @@ def test_chat_history_store_caps_at_150_messages_and_ignores_commands():
 
 
 @pytest.mark.asyncio
-async def test_chat_summary_menu_and_callback_flow():
+async def test_chat_summary_uses_bottom_reply_keyboard_and_deletes_status_message(tmp_path: Path):
     replies = []
-    edits = []
+    deleted_count = 0
 
-    class DummyReplyMsg:
+    class DummyStatusOrPromptMsg:
+        message_id = 901
+
+        async def delete(self):
+            nonlocal deleted_count
+            deleted_count += 1
+
         async def edit_text(self, text: str, reply_markup=None):
-            edits.append((text, reply_markup))
+            replies.append(("edit", text, reply_markup))
 
     class DummyIncomingMsg:
         chat = SimpleNamespace(id=-100555, type="supergroup")
+        message_id = 900
         text = "/chat_summary"
-        from_user = SimpleNamespace(full_name="مهدیار", first_name="مهدیار", is_bot=False)
+        caption = None
+        reply_to_message = None
+        from_user = SimpleNamespace(id=111, full_name="مهدیار", first_name="مهدیار", is_bot=False)
+        bot = None
 
         async def reply(self, text: str, reply_markup=None):
-            replies.append((text, reply_markup))
-            return DummyReplyMsg()
+            replies.append(("reply", text, reply_markup))
+            return DummyStatusOrPromptMsg()
 
     class DummySummarizer:
         async def summarize(self, transcript: str, speaker_name: str, language: str) -> SummaryResult:
@@ -526,40 +536,31 @@ async def test_chat_summary_menu_and_callback_flow():
                 provider="gemini",
             )
 
-    cache = TranscriptCache()
+    history_file = tmp_path / "chat_history.json"
+    cache = TranscriptCache(persistence_path=history_file)
     cache.add_chat_message(-100555, "علی", "سلام بچه‌ها فردا ساعت ۱۰ صبح جلسه داریم")
     cache.add_chat_message(-100555, "رضا", "گزارش مالی رو هم بیارید")
     cache.add_chat_message(-100555, "مهدیار", "حله من آماده می‌کنم")
 
-    # 1. Calling /chat_summary without number shows interactive count selection keyboard (10..150)
-    await handle_chat_summary_command(DummyIncomingMsg(), DummySummarizer(), cache)
+    # Verify persistence across restarts
+    reloaded_cache = TranscriptCache(persistence_path=history_file)
+    assert len(reloaded_cache.get_recent_chat_messages(-100555, limit=150)) == 3
+
+    # 1. Calling /chat_summary without number shows ReplyKeyboardMarkup at bottom input area
+    await handle_chat_summary_command(DummyIncomingMsg(), DummySummarizer(), reloaded_cache)
     assert len(replies) == 1
-    menu_text, menu_markup = replies[0]
-    assert "چند پیام آخر" in menu_text
-    callback_values = [
-        btn.callback_data
-        for row in menu_markup.inline_keyboard
-        for btn in row
-    ]
-    assert "chatsum:10" in callback_values
-    assert "chatsum:100" in callback_values
-    assert "chatsum:150" in callback_values
+    kind, menu_text, menu_markup = replies[0]
+    assert hasattr(menu_markup, "keyboard")  # ReplyKeyboardMarkup (bottom input bar), NOT inline_keyboard
+    assert menu_markup.resize_keyboard is True
+    assert menu_markup.one_time_keyboard is True
 
-    # 2. Clicking one of the count buttons (e.g. chatsum:100) summarizes the messages and replaces the menu
-    class DummyCallback:
-        data = "chatsum:100"
-        message = SimpleNamespace(
-            chat=SimpleNamespace(id=-100555, type="supergroup"),
-            edit_text=DummyReplyMsg().edit_text,
-        )
+    # 2. Selecting an option from the bottom keyboard summarizes, deletes temporary status message, and sends final output
+    replies.clear()
+    select_msg = DummyIncomingMsg()
+    select_msg.text = "📊 خلاصه ۱۰۰ پیام آخر"
+    await handle_chat_summary_command(select_msg, DummySummarizer(), reloaded_cache)
 
-        async def answer(self, text: str | None = None, show_alert: bool = False):
-            pass
-
-    await handle_chat_summary_callback(DummyCallback(), DummySummarizer(), cache)
-    assert len(edits) >= 2
-    assert "در حال خلاصه‌سازی" in edits[0][0]
-    assert edits[0][1] is None  # selection buttons disabled immediately!
-    final_text, final_markup = edits[-1]
+    assert deleted_count >= 1  # Status message was deleted!
+    final_kind, final_text, final_markup = replies[-1]
     assert "📌 خلاصه" in final_text
-    assert final_markup is not None  # has TTS audio summary button!
+    assert final_markup is not None

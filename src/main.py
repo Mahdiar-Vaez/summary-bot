@@ -86,6 +86,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
     cache = TranscriptCache(
         ttl_seconds=settings.transcript_cache_ttl_seconds,
         max_items=settings.transcript_cache_max_items,
+        persistence_path="data/chat_history.json",
     )
     dp = Dispatcher()
     dp.include_router(
@@ -123,11 +124,27 @@ async def configure_bot_profile(bot: Bot) -> None:
             [
                 BotCommand(
                     command="summary",
-                    description="خلاصه‌سازی ویس (با ریپلای) یا پیام‌های گفتگو",
+                    description="خلاصه‌سازی ویس (با ریپلای) یا انتخاب تعداد پیام",
                 ),
                 BotCommand(
                     command="chat_summary",
-                    description="خلاصه‌سازی ۱۰ تا ۱۵۰ پیام آخر گروه یا چنل (انتخابی)",
+                    description="انتخاب تعداد پیام برای خلاصه‌سازی از کیبورد پایین",
+                ),
+                BotCommand(
+                    command="summary_10",
+                    description="خلاصه‌سازی ۱۰ پیام آخر گروه یا چنل",
+                ),
+                BotCommand(
+                    command="summary_50",
+                    description="خلاصه‌سازی ۵۰ پیام آخر گروه یا چنل",
+                ),
+                BotCommand(
+                    command="summary_100",
+                    description="خلاصه‌سازی ۱۰۰ پیام آخر گروه یا چنل",
+                ),
+                BotCommand(
+                    command="summary_150",
+                    description="خلاصه‌سازی ۱۵۰ پیام آخر (حداکثر)",
                 ),
                 BotCommand(
                     command="start",
