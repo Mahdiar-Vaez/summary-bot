@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 
 from src.bot.cache import TranscriptCache
 from src.bot.handlers import create_bot_router
@@ -99,6 +100,45 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
     return dp
 
 
+async def configure_bot_profile(bot: Bot) -> None:
+    """Register bot commands, description, and short description on Telegram."""
+    try:
+        await bot.set_my_short_description(
+            short_description=(
+                "🎙️ خلاصه‌ساز هوشمند ویس (متنی و صوتی) + خلاصه‌ساز ۱۰ تا ۱۵۰ پیام آخر گروه و چنل 💬"
+            )
+        )
+        await bot.set_my_description(
+            description=(
+                "🤖 دستیار هوشمند خلاصه‌ساز ویس و پیام‌های گروه و چنل (@vaez_summary_bot)\n\n"
+                "✨ قابلیت‌های ربات:\n"
+                "۱. 🎙️ خلاصه‌سازی فوق‌سریع ویس و فایل‌های صوتی (فارسی و انگلیسی) به زبان خودمونی و روان\n"
+                "۲. 💬 خلاصه‌سازی پیام‌های گروه و چنل (از ۱۰ تا ۱۰۰ و حداکثر ۱۵۰ پیام آخر به انتخاب شما!) با دستور /chat_summary\n"
+                "۳. 🔊 تبدیل خلاصه‌ها به فایل صوتی (شنیدن خلاصه به صورت ویس)\n"
+                "۴. 📜 دریافت متن کامل پیاده‌شده‌ی ویس‌ها\n\n"
+                "🚀 کافیست ویس بفرستید، در گروه روی ویس ریپلای بزنید، یا دستور /chat_summary را امتحان کنید!"
+            )
+        )
+        await bot.set_my_commands(
+            [
+                BotCommand(
+                    command="summary",
+                    description="خلاصه‌سازی ویس (با ریپلای) یا پیام‌های گفتگو",
+                ),
+                BotCommand(
+                    command="chat_summary",
+                    description="خلاصه‌سازی ۱۰ تا ۱۵۰ پیام آخر گروه یا چنل (انتخابی)",
+                ),
+                BotCommand(
+                    command="start",
+                    description="راهنما و معرفی قابلیت‌های ربات",
+                ),
+            ]
+        )
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("Could not update Telegram bot profile metadata: %s", exc)
+
+
 async def main() -> None:
     """Run the Telegram bot using long polling."""
     logging.basicConfig(
@@ -116,6 +156,7 @@ async def main() -> None:
         )
 
     bot = Bot(token=settings.telegram_bot_token)
+    await configure_bot_profile(bot)
     dp = build_dispatcher(settings)
     logging.info("Starting Telegram Voice Summary Bot...")
     await dp.start_polling(bot)
