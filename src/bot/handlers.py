@@ -19,6 +19,7 @@ from aiogram.types import (
 
 from src.bot.cache import MAX_CHAT_HISTORY_PER_CHAT, TranscriptCache, chunk_text
 from src.bot.extractors import extract_speaker_name, extract_voice_target
+from src.bot.formatting import format_telegram_html
 from src.bot.keyboards import (
     build_chat_summary_reply_keyboard,
     build_transcript_keyboard,
@@ -302,7 +303,10 @@ async def process_voice_request(
             cache_id=cache_id, language=summary_result.language
         )
 
-        await status_msg.edit_text(summary_result.summary, reply_markup=keyboard)
+        await status_msg.edit_text(
+            format_telegram_html(summary_result.summary),
+            reply_markup=keyboard,
+        )
         cache.mark_voice_completed(voice_key)
 
     except FileTooLargeError:
@@ -373,7 +377,7 @@ async def _run_chat_history_summary(
         await _delete_and_send_output(
             origin_message=origin_message,
             status_msg=status_updater,
-            text=empty_msg,
+            text=format_telegram_html(empty_msg),
             reply_markup=ReplyKeyboardRemove() if origin_message is not None else None,
         )
         return
@@ -388,26 +392,11 @@ async def _run_chat_history_summary(
             speaker_name=f"{CHAT_HISTORY_SPEAKER_PREFIX}{actual_count}",
             language="fa",
         )
-        cache_id = cache.put(
-            speaker_name=f"{actual_count} پیام آخر",
-            text=combined_transcript,
-            summary=summary_result.summary,
-            language=summary_result.language,
-        )
-        entry = cache.get(cache_id)
-        if entry is not None:
-            entry.transcript_used = True
-        keyboard = build_transcript_keyboard(
-            cache_id=cache_id,
-            language=summary_result.language,
-            show_tts=True,
-            show_transcript=False,
-        )
         await _delete_and_send_output(
             origin_message=origin_message,
             status_msg=status_updater,
-            text=summary_result.summary,
-            reply_markup=keyboard,
+            text=format_telegram_html(summary_result.summary),
+            reply_markup=None,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to summarize chat history: %s", exc)
@@ -578,8 +567,9 @@ async def handle_tts_callback(
             if entry.language == "fa"
             else f"🔊 Audio summary of {entry.speaker_name}'s voice"
         )
+        ext = "wav" if tts_result.audio_bytes.startswith(b"RIFF") else "mp3"
         audio_file = BufferedInputFile(
-            tts_result.audio_bytes, filename=f"summary_{cache_id}.mp3"
+            tts_result.audio_bytes, filename=f"summary_{cache_id}.{ext}"
         )
         await msg.reply_voice(voice=audio_file, caption=caption)
     except Exception as exc:  # noqa: BLE001
@@ -608,15 +598,16 @@ def create_bot_router(
 
     @router.message(Command("start", "help"))
     async def cmd_start(message: Message) -> None:
-        await message.reply(
+        welcome = (
             "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس و پیام‌های گروه و کانال هستم.\n\n"
-            "✨ قابلیت‌های من:\n"
+            "✨ **قابلیت‌های من:**\n"
             "۱. 🎙️ **خلاصه‌سازی ویس در چت خصوصی:** هر ویس یا فایل صوتی را مستقیم برایم بفرست یا فوروارد کن.\n"
             "۲. 👥 **خلاصه‌سازی ویس در گروه‌ها:** روی هر ویسی ریپلای بزن و بنویس `خلاصه` (یا دستور `/summary` یا منشن `@vaez_summary_bot`).\n"
             "۳. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (۱۰ تا ۱۵۰ پیام آخر):** دستور `/chat_summary` را بزن تا دکمه‌های انتخاب تعداد در پایین صفحه (قسمت تایپ) باز شود، یا مستقیم از منوی `/` دستورات `/summary_10` تا `/summary_150` را انتخاب کن!\n"
-            "۴. 🔊 **خلاصه صوتی:** زیر تمام خلاصه‌ها می‌توانی نسخه صوتی خلاصه را هم بشنوی.\n\n"
+            "۴. 🔊 **خلاصه صوتی ویس‌ها:** زیر خلاصه ویس‌ها می‌توانی نسخه صوتی طبیعی را هم بشنوی.\n\n"
             "⚠️ **نکته مهم در گروه‌ها:** حتماً ربات را در گروه **Admin (ادمین)** کنید تا بتواند پیام‌های گروه را ببیند و خلاصه کند."
         )
+        await message.reply(format_telegram_html(welcome))
 
     @router.message(
         Command(

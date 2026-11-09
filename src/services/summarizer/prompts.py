@@ -23,12 +23,13 @@ def build_summary_prompt(
                 "قوانین اکید و حیاتی قالب خروجی:\n"
                 f"۱. خط اول دقیقاً و فقط همین عبارت باشد: «📌 خلاصه {count_label} پیام آخر گفتگو:»\n"
                 "۲. متن باید خیلی خیلی خلاصه و کوتاه باشد (بدون هیچ مقدمه، حاشیه یا تعارف اضافه)، اما **تمام مطالب، موضوعات مطرح‌شده، تصمیم‌ها، زمان‌ها، ساعت‌ها، اعداد، نام افراد کلیدی و نکات مهم** باید به صورت کامل و تیتروار با بولت‌پوینت (•) در آن شرح داده شوند تا هیچ نکته مهمی جا نیفتد.\n"
-                "۳. پیام‌های بی‌اهمیت مثل سلام و احوال‌پرسی‌های معمول را نادیده بگیر و مستقیم اصل مباحث و نتیجه‌گیری‌ها را بنویس.\n"
-                "۴. لحن متن کاملاً خودمونی، روان و جذاب باشد."
+                "۳. برای خوانایی عالی در تلگرام، تیتر هر نکته یا کلمات کلیدی مهم (مثل **نام افراد**، **ساعت‌ها** و **موضوع اصلی**) را حتماً بین دو ستاره `**...**` (بولد مارک‌داون) قرار بده.\n"
+                "۴. پیام‌های بی‌اهمیت مثل سلام و احوال‌پرسی‌های معمول را نادیده بگیر و مستقیم اصل مباحث و نتیجه‌گیری‌ها را بنویس.\n"
+                "۵. لحن متن کاملاً خودمونی، روان و جذاب باشد."
             )
             user_prompt = (
                 f"لیست {count_label} پیام آخر گفتگو:\n\"\"\"\n{transcript}\n\"\"\"\n\n"
-                f"لطفاً خلاصه خیلی کوتاه، خودمونی و جامع این پیام‌ها را (با پوشش تمام مطالب مهم، نام افراد و جزئیات کلیدی) با تیتر «📌 خلاصه {count_label} پیام آخر گفتگو:» بنویس."
+                f"لطفاً خلاصه خیلی کوتاه، خودمونی و جامع این پیام‌ها را (با فرمت مارک‌داون `**بولد**` برای نکات و اسامی مهم) با تیتر «📌 خلاصه {count_label} پیام آخر گفتگو:» بنویس."
             )
         else:
             system_prompt = (
@@ -37,7 +38,8 @@ def build_summary_prompt(
                 "Strict output format rules:\n"
                 f"1. Start the first line with: '📌 Summary of Last {count_label} Messages:'\n"
                 "2. Keep the summary ultra-concise and super short (casual conversational tone, zero fluff), while covering all discussed topics, key decisions, names, dates, times, numbers, and action items as short bullet points (•).\n"
-                "3. Skip small talk and greetings; focus purely on substance."
+                "3. Use Markdown bold (`**...**`) around key names, times, and topic labels for clean Telegram formatting.\n"
+                "4. Skip small talk and greetings; focus purely on substance."
             )
             user_prompt = (
                 f"Recent {count_label} chat messages:\n\"\"\"\n{transcript}\n\"\"\"\n\n"
@@ -55,11 +57,11 @@ def build_summary_prompt(
             "۲. در متن خلاصه به هیچ وجه نام گوینده را نیاور و از عباراتی مثل «فلانی میگه که...» یا «گوینده میگه...» استفاده نکن.\n"
             "۳. لحن متن باید کاملاً خودمونی و محاوره‌ای (نه کتابی و رسمی) باشد؛ انگار داری خیلی سریع به دوستت می‌گی طرف چی گفت.\n"
             "۴. متن باید خیلی خیلی خلاصه و کوتاه باشد (در کوتاه‌ترین حالت ممکن، بدون هیچ مقدمه، تعارف یا توضیح اضافه).\n"
-            "۵. با وجود کوتاه بودن، هیچ‌کدام از جزئیات و نکات مهم و حساس مثل نام افراد، زمان کاری، ساعت‌ها، روزها، تاریخ‌ها، مبالغ، اعداد و کارهای کلیدی نباید گم یا حذف شوند! همه را خیلی کوتاه و تیتروار با بولت‌پوینت (•) بنویس."
+            "۵. با وجود کوتاه بودن، هیچ‌کدام از جزئیات و نکات مهم و حساس مثل نام افراد، زمان کاری، ساعت‌ها، روزها، تاریخ‌ها، مبالغ، اعداد و کارهای کلیدی نباید گم یا حذف شوند! همه را خیلی کوتاه و تیتروار با بولت‌پوینت (•) بنویس و کلمات کلیدی مهم (مثل **نام افراد**، **ساعت‌ها**، **مبالغ** یا **موضوع**) را بین دو ستاره `**...**` بولد کن."
         )
         user_prompt = (
             f"متن پیاده‌شده از ویس:\n\"\"\"\n{transcript}\n\"\"\"\n\n"
-            f"لطفاً خلاصه خیلی خیلی کوتاه و خودمونی این ویس را (با حفظ تمام جزئیات مهم مثل نام افراد و زمان کاری) فقط با تیتر بالای «📌 خلاصه صحبت‌های {speaker}:» بنویس."
+            f"لطفاً خلاصه خیلی خیلی کوتاه و خودمونی این ویس را (با حفظ تمام جزئیات مهم مثل نام افراد و زمان کاری و بولد کردن نکات کلیدی با `**...**`) فقط با تیتر بالای «📌 خلاصه صحبت‌های {speaker}:» بنویس."
         )
     else:
         system_prompt = (
@@ -70,7 +72,7 @@ def build_summary_prompt(
             f"1. Start the first line with: '📌 Summary of {speaker}'s voice:'\n"
             "2. Do NOT mention the speaker's name in the summary body and do NOT write phrases like 'X says that...'.\n"
             "3. Keep the summary ultra-concise and super short (zero fluff or filler, casual conversational tone), while strictly retaining all critical and sensitive details "
-            "(names of people, working hours, exact numbers, dates, times, amounts, and action items) as very short bullet points (•).\n"
+            "(names of people, working hours, exact numbers, dates, times, amounts, and action items) as very short bullet points (•) with Markdown bold (`**...**`) on key terms.\n"
             "4. Every bullet point must be telegraphically brief and easy to scan in 2 seconds."
         )
         user_prompt = (

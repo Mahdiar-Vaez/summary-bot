@@ -6,6 +6,8 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
 from src.bot.cache import TranscriptCache
@@ -21,15 +23,23 @@ from src.services.summarizer.gemini_llm import GeminiSummarizerProvider
 from src.services.summarizer.groq_llm import GroqSummarizerProvider
 from src.services.summarizer.manager import SummarizerManager
 from src.services.summarizer.openrouter_llm import OpenRouterSummarizerProvider
+from src.services.tts.base import TTSProvider
 from src.services.tts.edge_tts_provider import EdgeTTSProvider
+from src.services.tts.gemini_tts import GeminiTTSProvider
 from src.services.tts.google_tts import GoogleTranslateTTSProvider
 from src.services.tts.manager import TTSManager
 
 GEMINI_FALLBACK_MODELS = (
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
     "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+)
+
+GEMINI_TTS_MODELS = (
+    "gemini-3.8-flash-tts",
+    "gemini-3.8-flash-lite-tts",
+    "gemini-3.1-flash-tts-preview",
 )
 
 
@@ -73,16 +83,23 @@ def build_summarizer_manager(settings: Settings) -> SummarizerManager:
     return SummarizerManager(providers)
 
 
-def build_tts_manager() -> TTSManager:
-    """Build TTSManager fallback chain (Edge Neural TTS -> Google Translate TTS)."""
-    return TTSManager([EdgeTTSProvider(), GoogleTranslateTTSProvider()])
+def build_tts_manager(settings: Settings | None = None) -> TTSManager:
+    """Build TTSManager fallback chain (Gemini 3.8/3.1 Flash TTS -> Edge Neural TTS -> Google TTS)."""
+    providers: list[TTSProvider] = []
+    if settings is not None and settings.gemini_api_key and settings.gemini_api_key.strip():
+        gkey = settings.gemini_api_key.strip()
+        for tts_model in GEMINI_TTS_MODELS:
+            providers.append(GeminiTTSProvider(api_key=gkey, model=tts_model))
+    providers.append(EdgeTTSProvider())
+    providers.append(GoogleTranslateTTSProvider())
+    return TTSManager(providers)
 
 
 def build_dispatcher(settings: Settings) -> Dispatcher:
     """Create and configure the aiogram Dispatcher."""
     stt_manager = build_stt_manager(settings)
     summarizer_manager = build_summarizer_manager(settings)
-    tts_manager = build_tts_manager()
+    tts_manager = build_tts_manager(settings)
     cache = TranscriptCache(
         ttl_seconds=settings.transcript_cache_ttl_seconds,
         max_items=settings.transcript_cache_max_items,
@@ -115,7 +132,7 @@ async def configure_bot_profile(bot: Bot) -> None:
                 "✨ قابلیت‌های ربات:\n"
                 "۱. 🎙️ خلاصه‌سازی فوق‌سریع ویس و فایل‌های صوتی (فارسی و انگلیسی) به زبان خودمونی و روان\n"
                 "۲. 💬 خلاصه‌سازی پیام‌های گروه و چنل (از ۱۰ تا ۱۰۰ و حداکثر ۱۵۰ پیام آخر به انتخاب شما!) با دستور /chat_summary\n"
-                "۳. 🔊 تبدیل خلاصه‌ها به فایل صوتی (شنیدن خلاصه به صورت ویس)\n"
+                "۳. 🔊 تبدیل خلاصه‌ی ویس‌ها به فایل صوتی طبیعی (شنیدن خلاصه به صورت ویس)\n"
                 "۴. 📜 دریافت متن کامل پیاده‌شده‌ی ویس‌ها\n\n"
                 "🚀 کافیست ویس بفرستید، در گروه روی ویس ریپلای بزنید، یا دستور /chat_summary را امتحان کنید!"
             )
@@ -172,7 +189,10 @@ async def main() -> None:
             "No LLM provider configured! Please set GEMINI_API_KEY or GROQ_API_KEY in your .env file."
         )
 
-    bot = Bot(token=settings.telegram_bot_token)
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
     await configure_bot_profile(bot)
     dp = build_dispatcher(settings)
     logging.info("Starting Telegram Voice Summary Bot...")

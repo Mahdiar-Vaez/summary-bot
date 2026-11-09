@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import edge_tts
 
 from src.exceptions import ProviderError
@@ -16,11 +17,13 @@ class EdgeTTSProvider:
 
     def __init__(
         self,
-        fa_voice: str = "fa-IR-FaridNeural",
-        en_voice: str = "en-US-AndrewNeural",
+        fa_voice: str = "fa-IR-DilaraNeural",
+        en_voice: str = "en-US-AriaNeural",
+        proxy: str | None = None,
     ) -> None:
         self.fa_voice = fa_voice
         self.en_voice = en_voice
+        self.proxy = proxy
 
     async def synthesize(self, text: str, language: str) -> TTSResult:
         norm_lang = normalize_language(language, text)
@@ -29,8 +32,16 @@ class EdgeTTSProvider:
             raise ProviderError("Cannot synthesize empty text")
 
         voice = self.fa_voice if norm_lang == "fa" else self.en_voice
+        active_proxy = (
+            self.proxy
+            or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+            or None
+        )
         try:
-            communicate = edge_tts.Communicate(spoken_text, voice)
+            communicate = edge_tts.Communicate(
+                spoken_text, voice, rate="+5%", proxy=active_proxy
+            )
             audio_chunks: list[bytes] = []
             async for chunk in communicate.stream():
                 if chunk.get("type") == "audio" and chunk.get("data"):

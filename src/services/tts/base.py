@@ -26,8 +26,18 @@ class TTSProvider(Protocol):
 
 
 def clean_text_for_tts(text: str) -> str:
-    """Strip markdown formatting and emojis so TTS reads the summary smoothly."""
-    cleaned = text.replace("📌", "").replace("•", "، ")
+    """Strip headers, HTML tags, markdown formatting, and emojis so TTS reads smoothly."""
+    cleaned = re.sub(r"<[^>]+>", "", text or "")
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if lines and (
+        "📌" in lines[0]
+        or lines[0].startswith("خلاصه صحبت")
+        or lines[0].lower().startswith("summary of")
+    ):
+        lines = lines[1:]
+
+    cleaned = "\n".join(lines)
+    cleaned = cleaned.replace("📌", "").replace("•", "، ")
     cleaned = re.sub(r"[*_`~#>]+", "", cleaned)
     cleaned = re.sub(r"\n+", ". ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)

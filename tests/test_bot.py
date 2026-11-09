@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 from src.bot.cache import TranscriptCache, chunk_text
 from src.bot.extractors import extract_voice_target
+from src.bot.formatting import format_telegram_html
 from src.bot.handlers import (
     MAX_CHAT_SUMMARY_MESSAGES,
     create_bot_router,
@@ -17,7 +18,7 @@ from src.bot.handlers import (
 )
 from src.config import Settings
 from src.exceptions import ProviderChainExhaustedError
-from src.main import build_stt_manager, build_summarizer_manager
+from src.main import build_stt_manager, build_summarizer_manager, build_tts_manager
 from src.services.stt.base import TranscriptionResult
 from src.services.summarizer.base import SummaryResult
 from src.services.tts.base import TTSResult
@@ -226,21 +227,28 @@ def test_build_managers_with_gemini_creates_multi_model_fallback_chain():
     )
     stt_mgr = build_stt_manager(settings)
     sum_mgr = build_summarizer_manager(settings)
+    tts_mgr = build_tts_manager(settings)
 
     stt_models = [getattr(p, "model", "") for p in stt_mgr.providers]
     sum_models = [getattr(p, "model", "") for p in sum_mgr.providers]
+    tts_names = [getattr(p, "name", "") for p in tts_mgr.providers]
 
     assert stt_models == [
-        "gemini-3.5-flash",
-        "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
         "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
     ]
     assert sum_models == [
-        "gemini-3.5-flash",
-        "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
         "gemini-3.1-flash-lite",
+        "gemini-3.5-flash",
+    ]
+    assert tts_names[:3] == [
+        "gemini-tts:gemini-3.8-flash-tts",
+        "gemini-tts:gemini-3.8-flash-lite-tts",
+        "gemini-tts:gemini-3.1-flash-tts-preview",
     ]
 
 
@@ -562,5 +570,15 @@ async def test_chat_summary_uses_bottom_reply_keyboard_and_deletes_status_messag
 
     assert deleted_count >= 1  # Status message was deleted!
     final_kind, final_text, final_markup = replies[-1]
-    assert "📌 خلاصه" in final_text
-    assert final_markup is not None
+    assert "📌" in final_text
+    assert final_markup is None  # Chat history summary must NOT have audio TTS button!
+
+
+def test_format_telegram_html_converts_markdown_and_escapes_html():
+    raw = "📌 خلاصه صحبت‌های mr.vaez:\n• جلسه فردا **ساعت ۱۰ صبح** با `علی` (هزینه < ۱۰۰)"
+    formatted = format_telegram_html(raw)
+    assert "<b>📌 خلاصه صحبت‌های mr.vaez:</b>" in formatted
+    assert "<b>ساعت ۱۰ صبح</b>" in formatted
+    assert "<code>علی</code>" in formatted
+    assert "&lt; ۱۰۰" in formatted
+    assert "**" not in formatted
