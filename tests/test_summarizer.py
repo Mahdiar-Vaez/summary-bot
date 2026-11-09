@@ -20,6 +20,8 @@ def test_build_summary_prompt_persian_has_header_only_and_forbids_name_in_body()
     assert "خودمونی و محاوره‌ای (نه کتابی و رسمی)" in system_prompt
     assert "نام افراد" in system_prompt
     assert "زمان کاری" in system_prompt
+    assert "کلمات بی‌معنی" in system_prompt or "کلمات بی معنی" in system_prompt
+    assert "حذف" in system_prompt
     assert "mr.vaez میگه که" not in system_prompt
 
 
