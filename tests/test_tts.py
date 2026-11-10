@@ -31,6 +31,9 @@ async def test_gemini_tts_provider_synthesizes_natural_persian_audio():
         prompt_text = body["contents"][0]["parts"][0]["text"]
         assert "زمان جلسه" in prompt_text
         assert "خلاصه صحبت‌های" not in prompt_text
+        assert "متن زیر را" not in prompt_text
+        assert "بخوان" not in prompt_text
+        assert prompt_text == "زمان جلسه: فردا ساعت ۱۰ صبح"
         return httpx.Response(
             200,
             json={

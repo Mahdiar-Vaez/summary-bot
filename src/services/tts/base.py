@@ -31,8 +31,8 @@ def clean_text_for_tts(text: str) -> str:
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
     if lines and (
         "📌" in lines[0]
-        or lines[0].startswith("خلاصه صحبت")
-        or lines[0].lower().startswith("summary of")
+        or "خلاصه" in lines[0]
+        or lines[0].lower().startswith("summary")
     ):
         lines = lines[1:]
 

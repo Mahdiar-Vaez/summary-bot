@@ -49,24 +49,12 @@ class GeminiTTSProvider:
         if not spoken_text:
             raise ProviderError("Cannot synthesize empty text")
 
-        if norm_lang == "fa":
-            instruction = (
-                "متن زیر را با لهجه کاملاً طبیعی، روان، صمیمی و استاندارد فارسی ایران "
-                "(با رعایت دقیق کسره اضافه و مکث‌های طبیعی) بخوان:\n"
-                f"{spoken_text}"
-            )
-        else:
-            instruction = (
-                "Read the following summary naturally in a warm, clear, conversational tone:\n"
-                f"{spoken_text}"
-            )
-
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.model}:generateContent?key={self.api_key}"
         )
         payload = {
-            "contents": [{"parts": [{"text": instruction}]}],
+            "contents": [{"parts": [{"text": spoken_text}]}],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
                 "speechConfig": {
