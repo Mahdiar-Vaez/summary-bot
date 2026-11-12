@@ -147,30 +147,20 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
 
 async def configure_bot_profile(bot: Bot) -> None:
     """Register bot commands, description, and short description on Telegram."""
+    short_description = (
+        "🎙️ خلاصه ویس + 💬 خلاصه ۲۵۰ پیام گروه + 😎 چت و شخصیت‌شناسی با @vaez_summary_bot، /ask و /vibe"
+    )
+    description = (
+        "🤖 دستیار خلاصه‌ساز ویس و پیام گروه (@vaez_summary_bot)\n\n"
+        "📌 چطور استفاده کنم؟\n"
+        "• 🎙️ خلاصه ویس: در پیوی ویس بفرست، در گروه روی ویس ریپلای بزن و /summary یا @vaez_summary_bot بفرست.\n"
+        "• 💬 خلاصه گروه (تا ۲۵۰ پیام): /chat_summary\n"
+        "• 😎 سوال و چت با بچه‌ها: @vaez_summary_bot سحر چی گفته؟ یا /ask و /vibe نام\n\n"
+        "📖 راهنمای کامل: /help"
+    )
     try:
-        await bot.set_my_short_description(
-            short_description=(
-                "🎙️ خلاصه‌ساز ویس + 💬 خلاصه ۲۵۰ پیام گروه + 😎 چت و شخصیت‌شناسی با @vaez_summary_bot، /ask و /vibe"
-            )
-        )
-        await bot.set_my_description(
-            description=(
-                "🤖 دستیار هوشمند خلاصه‌ساز ویس، پیام‌های گروه و هم‌صحبت فان (@vaez_summary_bot)\n\n"
-                "📌 چطور از ربات استفاده کنم؟\n"
-                "۱. 🎙️ خلاصه ویس:\n"
-                "   • در پیوی: ویس یا فایل صوتی را مستقیم بفرست.\n"
-                "   • در گروه: روی ویس ریپلای بزن و بنویس «خلاصه» یا /summary یا @vaez_summary_bot\n\n"
-                "۲. 💬 خلاصه پیام‌های گروه و چنل (تا ۲۵۰ پیام):\n"
-                "   • دستور /chat_summary را بزن و تعداد پیام را از پایین صفحه انتخاب کن.\n\n"
-                "۳. 😎 چت و سوال درباره بچه‌های گروه:\n"
-                "   • با آیدی ربات: @vaez_summary_bot سحر چی گفته؟\n"
-                "   • با دستور: /ask مهدی راجع به جلسه چی گفت؟\n"
-                "   • یا روی پیام خود ربات ریپلای بزن و حرفتو بگو!\n\n"
-                "۴. 🎭 تحلیل تیپ شخصیت و وایب:\n"
-                "   • /vibe (تحلیل کل گروه) یا /vibe مهدی (تحلیل یک نفر خاص)\n\n"
-                "📖 راهنمای کامل: /help"
-            )
-        )
+        await bot.set_my_short_description(short_description=short_description)
+        await bot.set_my_description(description=description)
         await bot.set_my_commands(
             [
                 BotCommand(

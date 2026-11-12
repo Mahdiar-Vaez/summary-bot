@@ -25,7 +25,12 @@ from src.bot.handlers import (
 )
 from src.config import Settings
 from src.exceptions import ProviderChainExhaustedError
-from src.main import build_stt_manager, build_summarizer_manager, build_tts_manager
+from src.main import (
+    build_stt_manager,
+    build_summarizer_manager,
+    build_tts_manager,
+    configure_bot_profile,
+)
 from src.services.stt.base import TranscriptionResult
 from src.services.summarizer.base import SummaryResult
 from src.services.tts.base import TTSResult
@@ -1072,3 +1077,28 @@ def test_help_text_and_fallback_chain_order():
     assert names[:4] == ["gemini", "gemini", "gemini", "gemini"]
     assert names[4:6] == ["intern-ai:deepseek-v4.1-flash-1017", "intern-ai:qwen3.8-27b"]
     assert names[6:] == ["groq-llm", "openrouter-llm"]
+
+
+@pytest.mark.asyncio
+async def test_configure_bot_profile_respects_telegram_limits():
+    captured = {}
+
+    class DummyBot:
+        async def set_my_short_description(self, short_description: str):
+            captured["short"] = short_description
+
+        async def set_my_description(self, description: str):
+            captured["desc"] = description
+
+        async def set_my_commands(self, commands):
+            captured["commands"] = commands
+
+    await configure_bot_profile(DummyBot())
+    assert len(captured["short"]) <= 120
+    assert len(captured["desc"]) <= 512
+    assert "@vaez_summary_bot" in captured["desc"]
+    assert "/help" in captured["desc"]
+    cmd_names = [c.command for c in captured["commands"]]
+    assert "help" in cmd_names
+    assert "ask" in cmd_names
+    assert "vibe" in cmd_names
