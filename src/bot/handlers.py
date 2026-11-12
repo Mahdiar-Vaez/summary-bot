@@ -423,15 +423,42 @@ def _format_wait_duration(seconds: int) -> str:
 
 
 def _enforce_chat_rate_limit(chat_id: int | str, cache: TranscriptCache) -> str | None:
-    """Return None if `chat_id` is within rate limit, else a friendly Persian wait notice."""
+    """Return None if `chat_id` is within rate limit, else a clear Persian cooldown notice."""
     allowed, retry_after = cache.check_and_consume_chat_rate_limit(chat_id)
     if allowed:
         return None
     wait_str = _format_wait_duration(retry_after)
     return (
-        f"⏳ سقف استفاده این چت ({cache.rate_limit_max_requests} پیام در هر "
-        f"{max(1, cache.rate_limit_window_seconds // 60)} دقیقه) پر شده!\n"
-        f"لطفاً حدود **{wait_str}** دیگه دوباره پیام بدید 🙏"
+        "⛔ **شما به محدودیت پیام برخوردید!**\n"
+        f"(سقف مجاز در این چت: **{cache.rate_limit_max_requests} پیام در هر "
+        f"{max(1, cache.rate_limit_window_seconds // 60)} دقیقه**)\n"
+        f"⏳ زمان باقی‌مانده: **{wait_str}**"
+    )
+
+
+def build_help_text(max_messages: int = MAX_CHAT_SUMMARY_MESSAGES) -> str:
+    """Return comprehensive, structured Persian usage guide for /help."""
+    return (
+        "📖 **راهنمای کامل ربات هوشمند @vaez_summary_bot**\n\n"
+        "۱. 🎙️ **خلاصه‌سازی ویس و فایل صوتی:**\n"
+        "   • **چت خصوصی (پیوی):** ویس را مستقیم برای ربات بفرست تا متنی + صوتی خلاصه‌اش کند.\n"
+        "   • **توی گروه:** روی هر ویسی ریپلای بزن و یکی از این‌ها را بفرست:\n"
+        "     `خلاصه`  |  `/summary`  |  `@vaez_summary_bot`\n"
+        "   • زیر خلاصه دکمه‌های **«🔊 شنیدن خلاصه صوتی»** و **«📜 متن کامل ویس»** هست.\n\n"
+        f"۲. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (تا {max_messages} پیام آخر):**\n"
+        "   • دستور `/chat_summary` را بزن و از دکمه‌های پایین صفحه (`۱۰` تا `۲۰۰` پیام) انتخاب کن.\n"
+        f"   • یا مستقیم عدد بفرست، مثلاً: `/chat_summary 250` یا `/summary_100`.\n\n"
+        f"۳. 😎 **چت و سؤال درباره حرف‌های بچه‌ها (با حافظه {max_messages} پیام اخیرِ همین چت):**\n"
+        "   • **با منشن آیدی ربات:** `@vaez_summary_bot سحر چی گفته؟`\n"
+        "   • **با دستور `/ask`:** `/ask مهدی راجع به جلسه چی گفت؟`\n"
+        "   • **با ریپلای:** روی پیام ربات یا یکی از بچه‌ها ریپلای بزن و با منشن `@vaez_summary_bot` بپرس «منظورش چیه؟»\n\n"
+        "۴. 🎭 **تحلیل تیپ شخصیت و وایب فان (`/vibe`):**\n"
+        "   • `/vibe` ← تحلیل فان کل بچه‌های فعال گروه\n"
+        "   • `/vibe مهدی` یا `@vaez_summary_bot تیپ شخصیت مهدی طبق این چتا چیه؟` ← تحلیل اختصاصی یک نفر\n\n"
+        "۵. 🛡️ **سهمیه و حریم خصوصی:**\n"
+        "   • تاریخچه و سشن هر گروه/چت کاملاً از بقیه چت‌ها جداست.\n"
+        "   • برای جلوگیری از شلوغی، در هر گروه/چت حداکثر **۵ درخواست هوشمند در هر ۵ دقیقه** مجاز است.\n"
+        "   • پاک کردن حافظه گفتگوی تعاملی همین چت: `/reset_chat`"
     )
 
 
@@ -1202,21 +1229,22 @@ def create_bot_router(
             logger.debug("Callback activity tracking skipped: %s", exc)
         return await handler(event, data)
 
-    @router.message(Command("start", "help"))
+    @router.message(Command("start"))
     async def cmd_start(message: Message) -> None:
         welcome = (
             "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس، پیام‌های گروه و هم‌صحبت فان شما هستم.\n\n"
-            "✨ **قابلیت‌های من:**\n"
-            "۱. 🎙️ **خلاصه‌سازی ویس در چت خصوصی:** هر ویس یا فایل صوتی را مستقیم برایم بفرست.\n"
-            "۲. 👥 **خلاصه‌سازی ویس در گروه‌ها:** روی هر ویسی ریپلای بزن و بنویس `خلاصه` (یا `/summary` یا `@vaez_summary_bot`).\n"
-            "۳. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (۱۰ تا ۲۰۰ پیام آخر):** با `/chat_summary` تعداد پیام را انتخاب کن.\n"
-            f"۴. 😎 **چت و سوال درباره پیام‌های گروه (تا {MAX_CHAT_SUMMARY_MESSAGES} پیام اخیر، با سشن جدا برای هر چت):**\n"
-            "   • می‌تونی درباره صحبت‌های بچه‌ها بپرسی (مثلاً: `@vaez_summary_bot سحر چی گفته؟`)\n"
-            "   • یا شخصیت‌شناسی بگیری (مثلاً: `@vaez_summary_bot تیپ شخصیت مهدی طبق این چتا چیه؟` یا `/vibe`)\n"
-            "   • کافیه در گروه `@vaez_summary_bot` رو منشن کنی، روی پیام ربات ریپلای بزنی، یا از `/ask` استفاده کنی.\n"
-            "۵. 🔊 **خلاصه صوتی ویس‌ها** + **دکمه‌های بازخورد** زیر هر خروجی."
+            "✨ **کارهای اصلی من:**\n"
+            "• 🎙️ خلاصه خودمونی ویس‌ها (پیوی یا ریپلای در گروه با `/summary` و `خلاصه`) + نسخه صوتی\n"
+            f"• 💬 خلاصه ۱۰ تا {MAX_CHAT_SUMMARY_MESSAGES} پیام آخر گروه و چنل با `/chat_summary`\n"
+            "• 😎 چت و سؤال درباره بچه‌ها با `@vaez_summary_bot` یا `/ask`\n"
+            "• 🎭 تحلیل شخصیت و وایب فان بچه‌های گروه با `/vibe`\n\n"
+            "📖 برای دیدن **راهنمای کامل و مثال‌ها** دستور `/help` را بزنید!"
         )
         await message.reply(format_telegram_html(welcome))
+
+    @router.message(Command("help"))
+    async def cmd_help(message: Message) -> None:
+        await message.reply(format_telegram_html(build_help_text()))
 
     @router.message(Command("set_admin"))
     async def cmd_set_admin(message: Message) -> None:

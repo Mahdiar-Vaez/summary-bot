@@ -7,6 +7,7 @@ from src.bot.extractors import extract_voice_target
 from src.bot.formatting import format_telegram_html
 from src.bot.handlers import (
     MAX_CHAT_SUMMARY_MESSAGES,
+    build_help_text,
     create_bot_router,
     handle_chat_interaction,
     handle_chat_summary_callback,
@@ -1029,6 +1030,8 @@ async def test_per_chat_rate_limiter_5_per_5_minutes_and_token_exhaustion_messag
         bot_username="vaez_summary_bot",
     )
     assert llm_calls == 5
+    assert "محدودیت پیام برخوردید" in sent[-1]
+    assert "زمان باقی‌مانده" in sent[-1]
     assert "5 پیام در هر 5 دقیقه" in sent[-1]
 
     # 3. Token/quota exhausted error sends the requested Persian admin-refill message
@@ -1045,3 +1048,27 @@ async def test_per_chat_rate_limiter_5_per_5_minutes_and_token_exhaustion_messag
     assert "فعلاً توکنام تموم شده" in sent[-1]
     assert "ادمینم" in sent[-1]
     assert "توکن رایگان" in sent[-1]
+
+
+def test_help_text_and_fallback_chain_order():
+    help_msg = build_help_text()
+    assert "@vaez_summary_bot" in help_msg
+    assert "/ask" in help_msg
+    assert "/vibe" in help_msg
+    assert "/chat_summary" in help_msg
+    assert "/summary" in help_msg
+    assert "۵ درخواست هوشمند در هر ۵ دقیقه" in help_msg
+
+    settings = Settings(
+        telegram_bot_token="123:ABC",
+        gemini_api_key="AIza_test",
+        fallback_llm_api_key="sk-fallback-test",
+        groq_api_key="gsk_test",
+        openrouter_api_key="sk-or-test",
+        _env_file=None,
+    )
+    mgr = build_summarizer_manager(settings)
+    names = [p.name for p in mgr.providers]
+    assert names[:4] == ["gemini", "gemini", "gemini", "gemini"]
+    assert names[4:6] == ["intern-ai:deepseek-v4.1-flash-1017", "intern-ai:qwen3.8-27b"]
+    assert names[6:] == ["groq-llm", "openrouter-llm"]

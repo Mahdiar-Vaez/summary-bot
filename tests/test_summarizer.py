@@ -170,7 +170,7 @@ async def test_build_chat_qa_prompt_and_manager_chat_with_fallback():
     )
     # Verify creator identity, strict privacy protection, ultra-conciseness, and secret scrubbing
     assert "مهدیار واعظ" in sys_lookup
-    assert "پارس‌پک" in sys_lookup
+    assert "نام سرور/هاست" in sys_lookup
 
     sys_secret, user_secret = build_chat_qa_prompt(
         chat_history=(
@@ -188,6 +188,51 @@ async def test_build_chat_qa_prompt_and_manager_chat_with_fallback():
     assert "AIzaSyDummyKeyValue123456789012345" not in user_secret
     assert "سحر" in user_secret
     assert "کوتاه" in sys_secret or "خلاصه" in sys_secret
+    assert "System Prompt" in sys_secret or "دستورالعمل" in sys_secret
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_strips_think_tags_and_falls_back_after_gemini():
+    from src.services.summarizer.openai_compatible import OpenAICompatibleSummarizerProvider
+
+    def gemini_down(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="service unavailable")
+
+    def custom_ok(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://discovery-api.intern-ai.org.cn/v1/chat/completions"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "<think>internal reasoning</think>\n**سحر** گفت ساعت ۶ کافه باشیم! ☕"
+                        }
+                    }
+                ]
+            },
+        )
+
+    gemini = GeminiSummarizerProvider(
+        api_key="AQ_test",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(gemini_down)),
+    )
+    fallback_ai = OpenAICompatibleSummarizerProvider(
+        api_key="sk-test",
+        base_url="https://discovery-api.intern-ai.org.cn/v1",
+        model="deepseek-v4.1-flash-1017",
+        name="intern-ai",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(custom_ok)),
+    )
+    mgr = SummarizerManager([gemini, fallback_ai])
+    res = await mgr.chat(
+        chat_history="[سحر]: ساعت ۶ کافه",
+        session_turns=[],
+        question="سحر چی گفته؟",
+        asker_name="مهدیار",
+    )
+    assert res.provider == "intern-ai:deepseek-v4.1-flash-1017"
+    assert res.summary == "**سحر** گفت ساعت ۶ کافه باشیم! ☕"
 
     def gemini_fail(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text="rate limit")

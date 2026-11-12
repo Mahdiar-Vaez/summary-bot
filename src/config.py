@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None
     gemini_api_key: str | None = None
     openrouter_api_key: str | None = None
+    fallback_llm_api_key: str | None = None
+    fallback_llm_base_url: str = "https://discovery-api.intern-ai.org.cn/v1"
+    fallback_llm_models: str = "deepseek-v4.1-flash-1017,qwen3.8-27b"
     cloudflare_account_id: str | None = None
     cloudflare_api_token: str | None = None
 
@@ -44,5 +47,10 @@ class Settings(BaseSettings):
         """Return True if at least one LLM summarizer provider has valid credentials."""
         return any(
             bool(key and key.strip())
-            for key in (self.gemini_api_key, self.groq_api_key, self.openrouter_api_key)
+            for key in (
+                self.gemini_api_key,
+                self.fallback_llm_api_key,
+                self.groq_api_key,
+                self.openrouter_api_key,
+            )
         )

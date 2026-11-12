@@ -22,6 +22,7 @@ from src.services.summarizer.base import SummarizerProvider
 from src.services.summarizer.gemini_llm import GeminiSummarizerProvider
 from src.services.summarizer.groq_llm import GroqSummarizerProvider
 from src.services.summarizer.manager import SummarizerManager
+from src.services.summarizer.openai_compatible import OpenAICompatibleSummarizerProvider
 from src.services.summarizer.openrouter_llm import OpenRouterSummarizerProvider
 from src.services.tts.base import TTSProvider
 from src.services.tts.edge_tts_provider import EdgeTTSProvider
@@ -68,12 +69,32 @@ def build_stt_manager(settings: Settings) -> STTManager:
 
 
 def build_summarizer_manager(settings: Settings) -> SummarizerManager:
-    """Build SummarizerManager fallback chain from configured credentials."""
+    """Build SummarizerManager fallback chain (Gemini -> Custom Fallback LLM -> Groq -> OpenRouter)."""
     providers: list[SummarizerProvider] = []
     if settings.gemini_api_key and settings.gemini_api_key.strip():
         gkey = settings.gemini_api_key.strip()
         for model_name in GEMINI_FALLBACK_MODELS:
             providers.append(GeminiSummarizerProvider(api_key=gkey, model=model_name))
+    if (
+        settings.fallback_llm_api_key
+        and settings.fallback_llm_api_key.strip()
+        and settings.fallback_llm_base_url
+        and settings.fallback_llm_base_url.strip()
+    ):
+        fkey = settings.fallback_llm_api_key.strip()
+        furl = settings.fallback_llm_base_url.strip()
+        fmodels = [m.strip() for m in (settings.fallback_llm_models or "").split(",") if m.strip()]
+        if not fmodels:
+            fmodels = ["deepseek-v4.1-flash-1017"]
+        for model_name in fmodels:
+            providers.append(
+                OpenAICompatibleSummarizerProvider(
+                    api_key=fkey,
+                    base_url=furl,
+                    model=model_name,
+                    name="intern-ai",
+                )
+            )
     if settings.groq_api_key and settings.groq_api_key.strip():
         providers.append(GroqSummarizerProvider(api_key=settings.groq_api_key.strip()))
     if settings.openrouter_api_key and settings.openrouter_api_key.strip():
@@ -129,36 +150,48 @@ async def configure_bot_profile(bot: Bot) -> None:
     try:
         await bot.set_my_short_description(
             short_description=(
-                "🎙️ خلاصه‌ساز ویس + 💬 خلاصه‌ساز ۲۰۰ پیام آخر گروه + 😎 پرسش‌ و پاسخ و شخصیت‌شناسی چت!"
+                "🎙️ خلاصه‌ساز ویس + 💬 خلاصه ۲۵۰ پیام گروه + 😎 چت و شخصیت‌شناسی با @vaez_summary_bot، /ask و /vibe"
             )
         )
         await bot.set_my_description(
             description=(
                 "🤖 دستیار هوشمند خلاصه‌ساز ویس، پیام‌های گروه و هم‌صحبت فان (@vaez_summary_bot)\n\n"
-                "✨ قابلیت‌های ربات:\n"
-                "۱. 🎙️ خلاصه‌سازی فوق‌سریع ویس (فارسی و انگلیسی) به زبان خودمونی\n"
-                "۲. 💬 خلاصه‌سازی ۱۰ تا ۲۰۰ پیام آخر گروه و چنل با دستور /chat_summary\n"
-                "۳. 😎 چت و سوال درباره صحبت‌های بچه‌های گروه (تا ۲۵۰ پیام اخیر، با سشن مجزا برای هر چت) و تحلیل تیپ شخصیت اعضا (با @vaez_summary_bot یا /ask یا /vibe)\n"
-                "۴. 🔊 تبدیل خلاصه‌ی ویس‌ها به ویس طبیعی فارسی + دریافت متن کامل ویس"
+                "📌 چطور از ربات استفاده کنم؟\n"
+                "۱. 🎙️ خلاصه ویس:\n"
+                "   • در پیوی: ویس یا فایل صوتی را مستقیم بفرست.\n"
+                "   • در گروه: روی ویس ریپلای بزن و بنویس «خلاصه» یا /summary یا @vaez_summary_bot\n\n"
+                "۲. 💬 خلاصه پیام‌های گروه و چنل (تا ۲۵۰ پیام):\n"
+                "   • دستور /chat_summary را بزن و تعداد پیام را از پایین صفحه انتخاب کن.\n\n"
+                "۳. 😎 چت و سوال درباره بچه‌های گروه:\n"
+                "   • با آیدی ربات: @vaez_summary_bot سحر چی گفته؟\n"
+                "   • با دستور: /ask مهدی راجع به جلسه چی گفت؟\n"
+                "   • یا روی پیام خود ربات ریپلای بزن و حرفتو بگو!\n\n"
+                "۴. 🎭 تحلیل تیپ شخصیت و وایب:\n"
+                "   • /vibe (تحلیل کل گروه) یا /vibe مهدی (تحلیل یک نفر خاص)\n\n"
+                "📖 راهنمای کامل: /help"
             )
         )
         await bot.set_my_commands(
             [
+                BotCommand(
+                    command="help",
+                    description="راهنمای کامل و مثال‌های استفاده از همه قابلیت‌ها",
+                ),
                 BotCommand(
                     command="summary",
                     description="خلاصه‌سازی ویس (با ریپلای) یا انتخاب تعداد پیام",
                 ),
                 BotCommand(
                     command="chat_summary",
-                    description="خلاصه‌سازی ۱۰ تا ۲۰۰ پیام آخر گروه یا چنل",
-                ),
-                BotCommand(
-                    command="vibe",
-                    description="تحلیل شخصیت و وایب فان اعضای همین گفتگو",
+                    description="خلاصه‌سازی ۱۰ تا ۲۵۰ پیام آخر گروه یا چنل",
                 ),
                 BotCommand(
                     command="ask",
                     description="پرسیدن سوال درباره حرف‌های بچه‌ها (مثلاً سحر چی گفته؟)",
+                ),
+                BotCommand(
+                    command="vibe",
+                    description="تحلیل شخصیت و وایب فان بچه‌ها (/vibe یا /vibe نام)",
                 ),
                 BotCommand(
                     command="summary_50",
@@ -178,7 +211,7 @@ async def configure_bot_profile(bot: Bot) -> None:
                 ),
                 BotCommand(
                     command="reset_chat",
-                    description="پاک‌سازی سشن گفتگوی تعاملی همین چت",
+                    description="پاک‌سازی حافظه گفتگوی تعاملی همین چت",
                 ),
                 BotCommand(
                     command="stats",
@@ -190,7 +223,7 @@ async def configure_bot_profile(bot: Bot) -> None:
                 ),
                 BotCommand(
                     command="start",
-                    description="راهنما و معرفی قابلیت‌های ربات",
+                    description="شروع و معرفی سریع ربات",
                 ),
             ]
         )

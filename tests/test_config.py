@@ -31,12 +31,25 @@ def test_settings_without_providers_reports_false():
         groq_api_key=None,
         gemini_api_key=None,
         openrouter_api_key=None,
+        fallback_llm_api_key=None,
         cloudflare_account_id=None,
         cloudflare_api_token=None,
         _env_file=None,
     )
     assert settings.has_any_stt_provider() is False
     assert settings.has_any_llm_provider() is False
+
+
+def test_settings_with_only_fallback_llm_key_has_llm():
+    settings = Settings(
+        telegram_bot_token="123:ABC",
+        gemini_api_key=None,
+        groq_api_key=None,
+        openrouter_api_key=None,
+        fallback_llm_api_key="sk-test-123",
+        _env_file=None,
+    )
+    assert settings.has_any_llm_provider() is True
 
 
 def test_provider_chain_exhausted_error_stores_errors():
