@@ -1063,6 +1063,8 @@ def test_help_text_and_fallback_chain_order():
     assert "/chat_summary" in help_msg
     assert "/summary" in help_msg
     assert "۵ درخواست هوشمند در هر ۵ دقیقه" in help_msg
+    assert "پیام‌های متنی" in help_msg
+    assert "فایل‌های چندرسانه‌ای" in help_msg
 
     settings = Settings(
         telegram_bot_token="123:ABC",
