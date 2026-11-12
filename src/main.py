@@ -107,6 +107,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         feedback_path="data/feedbacks.json",
         admin_config_path="data/admin_config.json",
         admin_chat_id=settings.admin_chat_id,
+        users_stats_path="data/users_stats.json",
     )
     dp = Dispatcher()
     dp.include_router(
@@ -176,6 +177,10 @@ async def configure_bot_profile(bot: Bot) -> None:
                 BotCommand(
                     command="reset_chat",
                     description="پاک‌سازی سشن گفتگوی تعاملی همین چت",
+                ),
+                BotCommand(
+                    command="stats",
+                    description="آمار کاربران فعال و وضعیت سرویس (مخصوص ادمین)",
                 ),
                 BotCommand(
                     command="feedbacks",

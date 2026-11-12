@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -11,6 +12,7 @@ from src.bot.handlers import (
     handle_chat_summary_callback,
     handle_chat_summary_command,
     handle_feedback_callback,
+    handle_stats_command,
     handle_transcript_callback,
     handle_tts_callback,
     process_voice_request,
@@ -18,6 +20,7 @@ from src.bot.handlers import (
     should_trigger_chat_interaction,
     should_trigger_on_reply,
     should_trigger_on_voice_message,
+    track_update_activity,
 )
 from src.config import Settings
 from src.exceptions import ProviderChainExhaustedError
@@ -857,3 +860,104 @@ async def test_chat_interaction_receives_at_least_200_messages_and_matches_named
         bot_username="vaez_summary_bot",
     )
     assert captured[-1][2] == "personality"
+
+
+@pytest.mark.asyncio
+async def test_active_users_stats_tracking_and_admin_only_command(tmp_path: Path):
+    stats_file = tmp_path / "users_stats.json"
+    admin_file = tmp_path / "admin.json"
+    cache = TranscriptCache(
+        users_stats_path=stats_file,
+        admin_config_path=admin_file,
+    )
+
+    now = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)
+    # 1. Direct active user within 24h
+    cache.record_activity(
+        user_id=5190248080,
+        user_name="مهدیار",
+        username="vaezm",
+        chat_id=5190248080,
+        chat_title="مهدیار",
+        chat_type="private",
+        is_direct=True,
+        now=now - timedelta(hours=2),
+    )
+    # 2. Passive user in a supergroup 3 days ago
+    cache.record_activity(
+        user_id=2002,
+        user_name="سحر",
+        username="sahar",
+        chat_id=-100999,
+        chat_title="گروه بچه‌ها",
+        chat_type="supergroup",
+        is_direct=False,
+        now=now - timedelta(days=3),
+    )
+    # 3. Older user 15 days ago
+    cache.record_activity(
+        user_id=3003,
+        user_name="رضا",
+        username=None,
+        chat_id=-100999,
+        chat_title="گروه بچه‌ها",
+        chat_type="supergroup",
+        is_direct=True,
+        now=now - timedelta(days=15),
+    )
+
+    # Track update helper (ignores bots, classifies mention as direct)
+    track_update_activity(
+        SimpleNamespace(
+            chat=SimpleNamespace(id=-100999, type="supergroup", title="گروه بچه‌ها"),
+            from_user=SimpleNamespace(id=4004, full_name="سارا", username="sara", is_bot=False),
+            text="@vaez_summary_bot سحر چی گفته؟",
+            caption=None,
+            reply_to_message=None,
+        ),
+        cache,
+        {"id": 999, "username": "vaez_summary_bot", "first_name": "SummaryBot"},
+    )
+    track_update_activity(
+        SimpleNamespace(
+            chat=SimpleNamespace(id=-100999, type="supergroup", title="گروه بچه‌ها"),
+            from_user=SimpleNamespace(id=999, full_name="Bot", is_bot=True),
+            text="bot msg",
+            caption=None,
+        ),
+        cache,
+    )
+
+    reloaded = TranscriptCache(users_stats_path=stats_file, admin_config_path=admin_file)
+    ustats = reloaded.get_active_users_stats(now=now)
+    assert ustats["total_users"] == 4
+    assert ustats["direct_users"] == 3
+    assert ustats["active_24h"] == 2  # user 5190248080 + user 4004
+    assert ustats["active_7d"] == 3
+    assert ustats["active_30d"] == 4
+    assert ustats["group_chats"] == 1
+    assert ustats["private_chats"] == 1
+
+    replies = []
+
+    class DummyCmdMsg:
+        def __init__(self, uid: int):
+            self.chat = SimpleNamespace(id=uid, type="private")
+            self.from_user = SimpleNamespace(id=uid, full_name="User", is_bot=False)
+
+        async def reply(self, text: str):
+            replies.append(text)
+
+    # Before admin is set -> prompts to run /set_admin
+    await handle_stats_command(DummyCmdMsg(5190248080), reloaded)
+    assert "/set_admin" in replies[-1]
+
+    # Register admin -> non-admin rejected, admin gets full active user report
+    reloaded.set_admin_chat_id(5190248080)
+    await handle_stats_command(DummyCmdMsg(2002), reloaded)
+    assert "فقط برای ادمین" in replies[-1]
+
+    await handle_stats_command(DummyCmdMsg(5190248080), reloaded)
+    assert "کاربران فعال" in replies[-1]
+    assert "5190248080" in replies[-1]
+    assert "سارا" in replies[-1] or "مهدیار" in replies[-1]

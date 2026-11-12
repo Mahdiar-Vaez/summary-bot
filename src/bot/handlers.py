@@ -82,6 +82,8 @@ _COMMAND_PREFIXES = (
     "/personality",
     "/reset_chat",
     "/feedbacks",
+    "/stats",
+    "/users",
     "/set_admin",
 )
 
@@ -864,6 +866,122 @@ def _format_admin_feedback_notification(entry: FeedbackEntry) -> str:
     return format_telegram_html(md_text)
 
 
+def track_update_activity(
+    event: Any,
+    cache: TranscriptCache,
+    bot_identity: dict[str, Any] | None = None,
+) -> None:
+    """Record user and chat activity from any Message or CallbackQuery update."""
+    sender = getattr(event, "from_user", None)
+    if getattr(sender, "is_bot", False):
+        return
+
+    user_id = getattr(sender, "id", None)
+    user_name = (
+        (
+            getattr(sender, "full_name", None)
+            or getattr(sender, "first_name", None)
+            or "کاربر"
+        ).strip()
+        if sender is not None
+        else ""
+    )
+    username = getattr(sender, "username", None) if sender is not None else None
+
+    msg = getattr(event, "message", None) if hasattr(event, "data") else event
+    chat = getattr(msg, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    chat_type = str(getattr(chat, "type", "private") or "private")
+    chat_title = _get_chat_title(msg) if msg is not None else ""
+
+    if hasattr(event, "data"):
+        is_direct = True
+    else:
+        text = (
+            getattr(event, "text", None) or getattr(event, "caption", None) or ""
+        ).strip()
+        ident = bot_identity or {}
+        is_direct = bool(
+            chat_type == "private"
+            or text.startswith("/")
+            or _is_bottom_keyboard_selection(text)
+            or _is_explicit_chat_summary_phrase(text)
+            or _is_explicit_summary_text(
+                text,
+                bot_username=ident.get("username"),
+                bot_first_name=ident.get("first_name"),
+            )
+            or should_trigger_chat_interaction(
+                event,
+                bot_id=ident.get("id"),
+                bot_username=ident.get("username"),
+                bot_first_name=ident.get("first_name"),
+            )
+        )
+
+    cache.record_activity(
+        user_id=user_id,
+        user_name=user_name,
+        username=username,
+        chat_id=chat_id,
+        chat_title=chat_title,
+        chat_type=chat_type,
+        is_direct=is_direct,
+    )
+
+
+def format_stats_report(cache: TranscriptCache) -> str:
+    """Build Persian HTML-ready Markdown report of active users, chats, feedbacks, and admin."""
+    ustats = cache.get_active_users_stats()
+    fstats = cache.get_feedback_stats()
+    admin_id = cache.get_admin_chat_id()
+    total_fb = fstats["total"]
+    pct_fb = round((fstats["up"] / total_fb) * 100) if total_fb else 0
+
+    lines = [
+        "📈 **آمار کاربران فعال و وضعیت سرویس:**",
+        "",
+        f"• ⚡ کاربران فعال **۲۴ ساعت اخیر:** **{ustats['active_24h']}** نفر (تعامل مستقیم با ربات: **{ustats['direct_24h']}**)",
+        f"• 🗓️ کاربران فعال **۷ روز اخیر:** **{ustats['active_7d']}** نفر",
+        f"• 📆 کاربران فعال **۳۰ روز اخیر:** **{ustats['active_30d']}** نفر",
+        f"• 👥 کل کاربران یکتای دیده‌شده: **{ustats['total_users']}** نفر (کاربران مستقیم: **{ustats['direct_users']}**)",
+        "",
+        f"• 💬 کل چت‌ها و گروه‌ها: **{ustats['total_chats']}** ({ustats['group_chats']} گروه/چنل | {ustats['private_chats']} پیوی | فعال ۷ روز اخیر: **{ustats['active_chats_7d']}**)",
+        f"• 👍 بازخوردها: **{total_fb}** (👍 {fstats['up']} | 👎 {fstats['down']} | رضایت **{pct_fb}%**)",
+        f"• 🛡️ ادمین فعلی: `{admin_id}`" if admin_id is not None else "• ⚠️ ادمین فعلی: هنوز تنظیم نشده (`/set_admin`)",
+    ]
+
+    recent_users = ustats.get("recent_users") or []
+    if recent_users:
+        lines.append("\n🕒 **آخرین کاربران فعال:**")
+        for idx, u in enumerate(recent_users[:8], start=1):
+            handle = f" (@{u['username']})" if u.get("username") else ""
+            lines.append(
+                f"{idx}. **{u['name']}**{handle} — تعامل مستقیم: `{u['direct_interactions']}`"
+            )
+
+    return format_telegram_html("\n".join(lines))
+
+
+async def handle_stats_command(message: Any, cache: TranscriptCache) -> None:
+    """Respond with active user & service analytics for the configured admin."""
+    admin_id = cache.get_admin_chat_id()
+    user_id = getattr(getattr(message, "from_user", None), "id", None)
+    if admin_id is None:
+        await message.reply(
+            format_telegram_html(
+                "⚠️ هنوز ادمین سرویس تنظیم نشده است!\n"
+                "برای ثبت خودتان به‌عنوان ادمین و دیدن آمار + دریافت بازخوردها، دستور `/set_admin` را بزنید."
+            )
+        )
+        return
+    if user_id != admin_id:
+        await message.reply("⛔ مشاهده آمار کاربران فعال سرویس فقط برای ادمین ربات مجاز است.")
+        return
+
+    await message.reply(format_stats_report(cache))
+
+
 async def handle_feedback_callback(
     callback: Any, cache: TranscriptCache
 ) -> None:
@@ -963,6 +1081,22 @@ def create_bot_router(
             bot_identity["username"] = getattr(me, "username", None)
             bot_identity["first_name"] = getattr(me, "first_name", None)
 
+    @router.message.outer_middleware()
+    async def _track_message_mw(handler: Any, event: Message, data: dict[str, Any]) -> Any:
+        try:
+            track_update_activity(event, cache, bot_identity)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Message activity tracking skipped: %s", exc)
+        return await handler(event, data)
+
+    @router.callback_query.outer_middleware()
+    async def _track_callback_mw(handler: Any, event: CallbackQuery, data: dict[str, Any]) -> Any:
+        try:
+            track_update_activity(event, cache, bot_identity)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Callback activity tracking skipped: %s", exc)
+        return await handler(event, data)
+
     @router.message(Command("start", "help"))
     async def cmd_start(message: Message) -> None:
         welcome = (
@@ -994,24 +1128,38 @@ def create_bot_router(
         await message.reply(
             format_telegram_html(
                 f"✅ **تنظیم شد!** از این به بعد خروجی تمام بازخوردهای 👍/👎 بلافاصله برای شما (`{target_chat}`) ارسال می‌شود.\n"
-                "همچنین هر زمان با دستور `/feedbacks` می‌توانید آمار کل بازخوردها را ببینید."
+                "• با `/stats` تعداد کاربران فعال و وضعیت سرویس را ببینید.\n"
+                "• با `/feedbacks` آمار کل بازخوردها را ببینید."
             )
         )
+
+    @router.message(Command("stats", "users"))
+    async def cmd_stats(message: Message) -> None:
+        await handle_stats_command(message, cache)
 
     @router.message(Command("feedbacks"))
     async def cmd_feedbacks(message: Message) -> None:
         admin_id = cache.get_admin_chat_id()
         user_id = getattr(getattr(message, "from_user", None), "id", None)
-        if admin_id is not None and user_id != admin_id:
+        if admin_id is None:
+            await message.reply(
+                format_telegram_html(
+                    "⚠️ هنوز ادمین سرویس تنظیم نشده است! لطفاً ابتدا `/set_admin` را بزنید."
+                )
+            )
+            return
+        if user_id != admin_id:
             await message.reply("⛔ مشاهده گزارش کامل بازخوردها فقط برای ادمین ربات مجاز است.")
             return
         stats = cache.get_feedback_stats()
+        ustats = cache.get_active_users_stats()
         total = stats["total"]
         up = stats["up"]
         down = stats["down"]
         pct = round((up / total) * 100) if total else 0
         lines = [
-            "📊 **گزارش کلی بازخوردهای کاربران:**",
+            "📊 **گزارش کلی بازخوردها و سرویس:**",
+            f"• 👥 کاربران فعال ۲۴ساعت: **{ustats['active_24h']}** نفر | کل کاربران: **{ustats['total_users']}** نفر (`/stats`)",
             f"• کل بازخوردها: **{total}** | 👍 عالی: **{up}** | 👎 ضعیف: **{down}** | رضایت: **{pct}%**",
         ]
         recent: list[FeedbackEntry] = stats["recent"]

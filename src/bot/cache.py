@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +73,7 @@ class TranscriptCache:
         feedback_path: Path | str | None = None,
         admin_config_path: Path | str | None = None,
         admin_chat_id: int | None = None,
+        users_stats_path: Path | str | None = None,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self.max_items = max_items
@@ -80,6 +81,7 @@ class TranscriptCache:
         self.persistence_path = Path(persistence_path) if persistence_path else None
         self.feedback_path = Path(feedback_path) if feedback_path else None
         self.admin_config_path = Path(admin_config_path) if admin_config_path else None
+        self.users_stats_path = Path(users_stats_path) if users_stats_path else None
         self._admin_chat_id: int | None = admin_chat_id
 
         self._store: OrderedDict[str, TranscriptEntry] = OrderedDict()
@@ -89,10 +91,13 @@ class TranscriptCache:
         self._chat_sessions: OrderedDict[str, deque[tuple[str, str, str]]] = OrderedDict()
         self._prompt_message_ids: dict[str, int] = {}
         self._feedbacks: OrderedDict[str, FeedbackEntry] = OrderedDict()
+        self._users_stats: dict[str, dict[str, Any]] = {}
+        self._chats_stats: dict[str, dict[str, Any]] = {}
 
         self._load_chat_history()
         self._load_feedbacks()
         self._load_admin_config()
+        self._load_users_stats()
 
     def _load_json_safe(self, path: Path | None) -> Any:
         if path is None or not path.exists():
@@ -243,6 +248,168 @@ class TranscriptCache:
             "up": up_count,
             "down": down_count,
             "recent": rated[-10:],
+        }
+
+    def _load_users_stats(self) -> None:
+        raw = self._load_json_safe(self.users_stats_path)
+        if not isinstance(raw, dict):
+            return
+        users = raw.get("users")
+        chats = raw.get("chats")
+        if isinstance(users, dict):
+            self._users_stats = {str(k): v for k, v in users.items() if isinstance(v, dict)}
+        if isinstance(chats, dict):
+            self._chats_stats = {str(k): v for k, v in chats.items() if isinstance(v, dict)}
+
+    def _save_users_stats(self) -> None:
+        self._save_json_safe(
+            self.users_stats_path,
+            {"users": self._users_stats, "chats": self._chats_stats},
+        )
+
+    def record_activity(
+        self,
+        *,
+        user_id: int | None = None,
+        user_name: str = "",
+        username: str | None = None,
+        chat_id: int | str | None = None,
+        chat_title: str = "",
+        chat_type: str = "private",
+        is_direct: bool = True,
+        now: datetime | None = None,
+    ) -> None:
+        """Record user and chat activity persistently for active-user analytics."""
+        ts = (now or datetime.now(timezone.utc)).isoformat()
+        changed = False
+
+        if user_id is not None:
+            ukey = str(user_id)
+            clean_name = (user_name or "کاربر").strip()
+            clean_handle = username.lstrip("@").strip() if username else None
+            existing = self._users_stats.get(ukey)
+            if existing is None:
+                self._users_stats[ukey] = {
+                    "user_id": int(user_id),
+                    "name": clean_name,
+                    "username": clean_handle,
+                    "first_seen": ts,
+                    "last_seen": ts,
+                    "direct_interactions": 1 if is_direct else 0,
+                    "total_events": 1,
+                }
+            else:
+                existing["name"] = clean_name or existing.get("name", "کاربر")
+                if clean_handle:
+                    existing["username"] = clean_handle
+                existing["last_seen"] = ts
+                existing["total_events"] = int(existing.get("total_events", 0)) + 1
+                if is_direct:
+                    existing["direct_interactions"] = int(existing.get("direct_interactions", 0)) + 1
+            changed = True
+
+        if chat_id is not None:
+            ckey = str(chat_id)
+            clean_title = (chat_title or ckey).strip()
+            existing_chat = self._chats_stats.get(ckey)
+            if existing_chat is None:
+                self._chats_stats[ckey] = {
+                    "chat_id": ckey,
+                    "title": clean_title,
+                    "chat_type": chat_type or "private",
+                    "first_seen": ts,
+                    "last_seen": ts,
+                    "total_events": 1,
+                }
+            else:
+                if clean_title:
+                    existing_chat["title"] = clean_title
+                if chat_type:
+                    existing_chat["chat_type"] = chat_type
+                existing_chat["last_seen"] = ts
+                existing_chat["total_events"] = int(existing_chat.get("total_events", 0)) + 1
+            changed = True
+
+        if changed:
+            self._save_users_stats()
+
+    def get_active_users_stats(self, now: datetime | None = None) -> dict[str, Any]:
+        """Compute total and active user/chat counts across 24h, 7d, and 30d windows."""
+        ref = now or datetime.now(timezone.utc)
+        cutoff_24h = ref - timedelta(hours=24)
+        cutoff_7d = ref - timedelta(days=7)
+        cutoff_30d = ref - timedelta(days=30)
+
+        def _parse_ts(value: Any) -> datetime | None:
+            if not isinstance(value, str) or not value:
+                return None
+            try:
+                parsed = datetime.fromisoformat(value)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            except ValueError:
+                return None
+
+        active_24h = 0
+        active_7d = 0
+        active_30d = 0
+        direct_users = 0
+        direct_24h = 0
+        recent_users: list[dict[str, Any]] = []
+
+        for info in self._users_stats.values():
+            last_dt = _parse_ts(info.get("last_seen"))
+            has_direct = int(info.get("direct_interactions", 0)) > 0
+            if has_direct:
+                direct_users += 1
+            if last_dt is not None:
+                if last_dt >= cutoff_24h:
+                    active_24h += 1
+                    if has_direct:
+                        direct_24h += 1
+                if last_dt >= cutoff_7d:
+                    active_7d += 1
+                if last_dt >= cutoff_30d:
+                    active_30d += 1
+            recent_users.append(
+                {
+                    "user_id": info.get("user_id"),
+                    "name": info.get("name", "کاربر"),
+                    "username": info.get("username"),
+                    "last_seen": info.get("last_seen", ""),
+                    "direct_interactions": int(info.get("direct_interactions", 0)),
+                    "total_events": int(info.get("total_events", 0)),
+                }
+            )
+
+        recent_users.sort(key=lambda u: u.get("last_seen", ""), reverse=True)
+
+        group_chats = 0
+        private_chats = 0
+        active_chats_7d = 0
+        for cinfo in self._chats_stats.values():
+            ctype = str(cinfo.get("chat_type", "private")).lower()
+            if ctype == "private":
+                private_chats += 1
+            else:
+                group_chats += 1
+            last_chat_dt = _parse_ts(cinfo.get("last_seen"))
+            if last_chat_dt is not None and last_chat_dt >= cutoff_7d:
+                active_chats_7d += 1
+
+        return {
+            "total_users": len(self._users_stats),
+            "direct_users": direct_users,
+            "active_24h": active_24h,
+            "direct_24h": direct_24h,
+            "active_7d": active_7d,
+            "active_30d": active_30d,
+            "total_chats": len(self._chats_stats),
+            "group_chats": group_chats,
+            "private_chats": private_chats,
+            "active_chats_7d": active_chats_7d,
+            "recent_users": recent_users[:10],
         }
 
     def set_prompt_message_id(self, chat_id: int | str, message_id: int | None) -> None:
