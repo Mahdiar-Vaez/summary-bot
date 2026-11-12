@@ -7,12 +7,15 @@ from src.bot.formatting import format_telegram_html
 from src.bot.handlers import (
     MAX_CHAT_SUMMARY_MESSAGES,
     create_bot_router,
+    handle_chat_interaction,
     handle_chat_summary_callback,
     handle_chat_summary_command,
+    handle_feedback_callback,
     handle_transcript_callback,
     handle_tts_callback,
     process_voice_request,
     record_incoming_chat_message,
+    should_trigger_chat_interaction,
     should_trigger_on_reply,
     should_trigger_on_voice_message,
 )
@@ -422,11 +425,11 @@ async def test_handle_tts_and_transcript_callbacks_disable_buttons_after_click()
     callback_answers = []
 
     class DummyMsg:
-        async def reply_voice(self, voice, caption=None):
-            sent_voices.append((voice, caption))
+        async def reply_voice(self, voice, caption=None, reply_markup=None):
+            sent_voices.append((voice, caption, reply_markup))
 
-        async def reply(self, text: str):
-            sent_transcripts.append(text)
+        async def reply(self, text: str, reply_markup=None):
+            sent_transcripts.append((text, reply_markup))
 
         async def edit_reply_markup(self, reply_markup=None):
             edited_markups.append(reply_markup)
@@ -571,7 +574,10 @@ async def test_chat_summary_uses_bottom_reply_keyboard_and_deletes_status_messag
     assert deleted_count >= 1  # Status message was deleted!
     final_kind, final_text, final_markup = replies[-1]
     assert "📌" in final_text
-    assert final_markup is None  # Chat history summary must NOT have audio TTS button!
+    assert final_markup is not None  # Must have feedback buttons!
+    fb_datas = [btn.callback_data for row in final_markup.inline_keyboard for btn in row]
+    assert all(cb.startswith("fb:") for cb in fb_datas)
+    assert not any(cb.startswith("tts:") for cb in fb_datas)  # No audio button on group chat summary
 
 
 def test_format_telegram_html_converts_markdown_and_escapes_html():
@@ -582,3 +588,210 @@ def test_format_telegram_html_converts_markdown_and_escapes_html():
     assert "<code>علی</code>" in formatted
     assert "&lt; ۱۰۰" in formatted
     assert "**" not in formatted
+
+
+def test_should_trigger_chat_interaction_detection():
+    bot_id = 9048492533
+    private_text = SimpleNamespace(
+        chat=SimpleNamespace(type="private"),
+        from_user=SimpleNamespace(id=1, is_bot=False),
+        text="سلام ربات! شخصیت علی چطوریه؟",
+        caption=None,
+        reply_to_message=None,
+    )
+    group_mention = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        from_user=SimpleNamespace(id=1, is_bot=False),
+        text="@vaez_summary_bot نظرت راجع به شخصیت بچه‌های گروه چیه؟",
+        caption=None,
+        reply_to_message=None,
+    )
+    group_reply_to_bot = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        from_user=SimpleNamespace(id=1, is_bot=False),
+        text="جدی میگی؟ بیشتر توضیح بده!",
+        caption=None,
+        reply_to_message=SimpleNamespace(
+            from_user=SimpleNamespace(id=bot_id, username="vaez_summary_bot", is_bot=True),
+            voice=None,
+            audio=None,
+        ),
+    )
+    group_normal_chat = SimpleNamespace(
+        chat=SimpleNamespace(type="supergroup"),
+        from_user=SimpleNamespace(id=1, is_bot=False),
+        text="بچه‌ها ساعت ۵ جلسه داریم",
+        caption=None,
+        reply_to_message=None,
+    )
+
+    assert should_trigger_chat_interaction(private_text, bot_id=bot_id, bot_username="vaez_summary_bot") is True
+    assert should_trigger_chat_interaction(group_mention, bot_id=bot_id, bot_username="vaez_summary_bot") is True
+    assert should_trigger_chat_interaction(group_reply_to_bot, bot_id=bot_id, bot_username="vaez_summary_bot") is True
+    assert should_trigger_chat_interaction(group_normal_chat, bot_id=bot_id, bot_username="vaez_summary_bot") is False
+
+
+@pytest.mark.asyncio
+async def test_chat_interaction_isolates_sessions_by_chat_id(tmp_path: Path):
+    seen_contexts = []
+    sent_replies = []
+
+    class DummySummarizer:
+        async def chat(
+            self,
+            chat_history: str,
+            session_turns: list[tuple[str, str]],
+            question: str,
+            asker_name: str,
+            mode: str = "chat",
+            language: str = "fa",
+        ) -> SummaryResult:
+            seen_contexts.append((chat_history, list(session_turns), question, mode))
+            return SummaryResult(
+                summary=f"جواب فان برای {asker_name}: عالیه!",
+                language="fa",
+                provider="gemini",
+            )
+
+    class DummyMsg:
+        def __init__(self, chat_id: int, text: str, sender: str):
+            self.chat = SimpleNamespace(id=chat_id, type="supergroup", title=f"Chat {chat_id}")
+            self.text = text
+            self.caption = None
+            self.from_user = SimpleNamespace(id=42, full_name=sender, first_name=sender, is_bot=False)
+
+        async def reply(self, text: str, reply_markup=None):
+            sent_replies.append((text, reply_markup))
+            return SimpleNamespace(edit_text=lambda *a, **kw: None)
+
+    cache = TranscriptCache(
+        persistence_path=tmp_path / "hist.json",
+        feedback_path=tmp_path / "fb.json",
+        admin_config_path=tmp_path / "admin.json",
+    )
+    cache.add_chat_message(-1001, "سارا", "راز گروه اول: فردا جشن داریم")
+    cache.add_chat_message(-1002, "نیما", "راز گروه دوم: سرور آپدیت میشه")
+
+    # Ask in Chat -1001
+    await handle_chat_interaction(
+        DummyMsg(-1001, "@vaez_summary_bot شخصیت بچه‌ها چطوریه؟", "مهدیار"),
+        DummySummarizer(),
+        cache,
+        bot_username="vaez_summary_bot",
+        mode="personality",
+    )
+    # Ask in Chat -1002
+    await handle_chat_interaction(
+        DummyMsg(-1002, "@vaez_summary_bot چه خبره اینجا؟", "علی"),
+        DummySummarizer(),
+        cache,
+        bot_username="vaez_summary_bot",
+    )
+
+    assert "سارا" in seen_contexts[0][0]
+    assert "نیما" not in seen_contexts[0][0]
+    assert "نیما" in seen_contexts[1][0]
+    assert "سارا" not in seen_contexts[1][0]
+    assert len(seen_contexts[1][1]) == 0  # Session turns MUST be isolated per chat!
+
+    # Reply must include feedback buttons
+    reply_text, reply_markup = sent_replies[-1]
+    assert reply_markup is not None
+    assert any(
+        btn.callback_data.startswith("fb:")
+        for row in reply_markup.inline_keyboard
+        for btn in row
+    )
+
+
+@pytest.mark.asyncio
+async def test_feedback_buttons_disappear_on_click_and_notify_admin(tmp_path: Path):
+    edited_markups = []
+    admin_notifications = []
+    callback_answers = []
+
+    class DummyBot:
+        async def send_message(self, chat_id: int, text: str):
+            admin_notifications.append((chat_id, text))
+
+    class DummyMsg:
+        def __init__(self, chat_id: int):
+            self.chat = SimpleNamespace(id=chat_id, type="supergroup", title="گروه تست")
+            self.bot = DummyBot()
+
+        async def edit_reply_markup(self, reply_markup=None):
+            edited_markups.append(reply_markup)
+
+    class DummyCallback:
+        def __init__(self, data: str, msg: DummyMsg):
+            self.data = data
+            self.message = msg
+            self.from_user = SimpleNamespace(
+                id=555, full_name="حسین", first_name="حسین", username="hosein"
+            )
+
+        async def answer(self, text: str | None = None, show_alert: bool = False):
+            callback_answers.append((text, show_alert))
+
+    fb_file = tmp_path / "feedbacks.json"
+    admin_file = tmp_path / "admin.json"
+    cache = TranscriptCache(
+        persistence_path=tmp_path / "hist.json",
+        feedback_path=fb_file,
+        admin_config_path=admin_file,
+        admin_chat_id=99999,
+    )
+
+    # Case 1: Standalone output (e.g. TTS audio or chat summary) -> buttons vanish completely (None)
+    fb_id_voice = cache.create_feedback_target(
+        output_type="tts_voice",
+        chat_id=-1001,
+        chat_title="گروه تست",
+        preview="خلاصه صوتی صحبت‌ها...",
+    )
+    msg1 = DummyMsg(-1001)
+    await handle_feedback_callback(DummyCallback(f"fb:{fb_id_voice}:up", msg1), cache)
+    assert edited_markups[-1] is None
+    assert len(admin_notifications) == 1
+    assert admin_notifications[0][0] == 99999
+    assert "👍" in admin_notifications[0][1]
+    assert "حسین" in admin_notifications[0][1]
+
+    # Clicking again does not duplicate admin notification
+    await handle_feedback_callback(DummyCallback(f"fb:{fb_id_voice}:down", msg1), cache)
+    assert len(admin_notifications) == 1
+
+    # Case 2: Voice summary with TTS + Transcript buttons -> ONLY feedback row vanishes, other buttons remain!
+    cid = cache.put(speaker_name="مهدیار", text="متن", summary="خلاصه", language="fa")
+    fb_id_sum = cache.create_feedback_target(
+        output_type="voice_summary",
+        chat_id=-1001,
+        chat_title="گروه تست",
+        preview="خلاصه متنی...",
+        linked_transcript_cache_id=cid,
+    )
+    entry = cache.get(cid)
+    entry.fb_id = fb_id_sum
+    msg2 = DummyMsg(-1001)
+    await handle_feedback_callback(DummyCallback(f"fb:{fb_id_sum}:down", msg2), cache)
+    remaining_cbs = [
+        btn.callback_data
+        for row in edited_markups[-1].inline_keyboard
+        for btn in row
+    ]
+    assert f"tts:{cid}" in remaining_cbs
+    assert f"transcript:{cid}" in remaining_cbs
+    assert not any(cb.startswith("fb:") for cb in remaining_cbs)
+    assert len(admin_notifications) == 2
+    assert "👎" in admin_notifications[1][1]
+
+    # Verify persistence across reload
+    reloaded = TranscriptCache(
+        persistence_path=tmp_path / "hist.json",
+        feedback_path=fb_file,
+        admin_config_path=admin_file,
+    )
+    stats = reloaded.get_feedback_stats()
+    assert stats["up"] == 1
+    assert stats["down"] == 1
+    assert stats["total"] == 2

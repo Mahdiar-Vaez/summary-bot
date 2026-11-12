@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 20
     transcript_cache_ttl_seconds: int = 3600
     transcript_cache_max_items: int = 500
+    admin_chat_id: int | None = None
 
     def has_any_stt_provider(self) -> bool:
         """Return True if at least one STT provider has valid credentials."""

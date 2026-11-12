@@ -1,7 +1,7 @@
 import httpx
 import pytest
 from src.exceptions import ProviderChainExhaustedError
-from src.services.summarizer.prompts import build_summary_prompt
+from src.services.summarizer.prompts import build_chat_qa_prompt, build_summary_prompt
 from src.services.summarizer.gemini_llm import GeminiSummarizerProvider
 from src.services.summarizer.groq_llm import GroqSummarizerProvider
 from src.services.summarizer.openrouter_llm import OpenRouterSummarizerProvider
@@ -141,3 +141,57 @@ def test_build_summary_prompt_for_chat_history_persian_and_english():
     )
     assert "📌 Summary of Last 50 Messages:" in sys_en
     assert "ultra-concise" in sys_en
+
+
+@pytest.mark.asyncio
+async def test_build_chat_qa_prompt_and_manager_chat_with_fallback():
+    sys_prompt, user_prompt = build_chat_qa_prompt(
+        chat_history="[علی]: من همیشه سر ساعتم میام\n[رضا]: نه بابا تو همش دیر میای 😂",
+        session_turns=[("مهدیار", "سلام ربات!", "سلام چطوری؟")],
+        question="شخصیت علی و رضا چطوریه؟",
+        asker_name="مهدیار",
+        mode="personality",
+        language="fa",
+    )
+    assert "شخصیت" in sys_prompt
+    assert "همین چت" in sys_prompt or "این گفتگو" in sys_prompt
+    assert "شخصیت علی و رضا چطوریه؟" in user_prompt
+    assert "علی" in user_prompt
+    assert "سلام ربات!" in user_prompt
+
+    def gemini_fail(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="rate limit")
+
+    def groq_ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "**علی** آدم وقت‌شناسِ روی کاغذه ولی به روایت **رضا** همیشه با تاخیر لاکچری میاد! 😄"
+                        }
+                    }
+                ]
+            },
+        )
+
+    gemini = GeminiSummarizerProvider(
+        api_key="AQ_test",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(gemini_fail)),
+    )
+    groq = GroqSummarizerProvider(
+        api_key="gsk_test",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(groq_ok)),
+    )
+    mgr = SummarizerManager([gemini, groq])
+    res = await mgr.chat(
+        chat_history="[علی]: من همیشه سر ساعتم میام\n[رضا]: نه بابا تو همش دیر میای 😂",
+        session_turns=[],
+        question="شخصیت بقیه رو بگو",
+        asker_name="مهدیار",
+        mode="personality",
+        language="fa",
+    )
+    assert res.provider == "groq-llm"
+    assert "علی" in res.summary

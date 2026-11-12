@@ -1,4 +1,4 @@
-"""Inline and bottom-input keyboards for Telegram voice and chat history summary messages."""
+"""Inline and bottom-input keyboards for Telegram voice, chat summaries, and feedback."""
 
 from __future__ import annotations
 
@@ -10,16 +10,38 @@ from aiogram.types import (
 )
 
 
+def build_feedback_row(fb_id: str, language: str = "fa") -> list[InlineKeyboardButton]:
+    """Create thumbs-up / thumbs-down inline feedback buttons for a single output message."""
+    if language == "fa":
+        up_label = "👍 عالی بود"
+        down_label = "👎 نیاز به بهبود"
+    else:
+        up_label = "👍 Helpful"
+        down_label = "👎 Needs work"
+
+    return [
+        InlineKeyboardButton(text=up_label, callback_data=f"fb:{fb_id}:up"),
+        InlineKeyboardButton(text=down_label, callback_data=f"fb:{fb_id}:down"),
+    ]
+
+
+def build_feedback_keyboard(fb_id: str, language: str = "fa") -> InlineKeyboardMarkup:
+    """Create a standalone inline feedback keyboard for text, voice TTS, or Q&A outputs."""
+    return InlineKeyboardMarkup(inline_keyboard=[build_feedback_row(fb_id, language)])
+
+
 def build_transcript_keyboard(
     cache_id: str,
     language: str = "fa",
     *,
     show_tts: bool = True,
     show_transcript: bool = True,
+    show_feedback: bool = False,
+    fb_id: str | None = None,
 ) -> InlineKeyboardMarkup | None:
-    """Create inline buttons to listen to the audio summary or view the full transcript.
+    """Create inline buttons for voice summary outputs (audio, transcript, optional feedback).
 
-    Returns None when both buttons have already been clicked and disabled.
+    Returns None when all buttons have already been clicked and disabled.
     """
     if language == "fa":
         tts_label = "🔊 شنیدن خلاصه صوتی"
@@ -47,6 +69,8 @@ def build_transcript_keyboard(
                 )
             ]
         )
+    if show_feedback and fb_id:
+        rows.append(build_feedback_row(fb_id, language=language))
 
     if not rows:
         return None

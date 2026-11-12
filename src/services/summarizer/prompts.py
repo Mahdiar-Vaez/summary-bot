@@ -84,3 +84,82 @@ def build_summary_prompt(
         )
 
     return system_prompt, user_prompt
+
+
+def build_chat_qa_prompt(
+    chat_history: str,
+    session_turns: list[tuple[str, str]],
+    question: str,
+    asker_name: str,
+    mode: str = "chat",
+    language: str = "fa",
+) -> tuple[str, str]:
+    """Build (system_prompt, user_prompt) for interactive per-chat Q&A and fun personality analysis."""
+    clean_question = (question or "").strip()
+    asker = (asker_name or "کاربر").strip()
+    norm_lang = normalize_language(language, f"{clean_question}\n{chat_history}")
+
+    history_block = (chat_history or "").strip() or (
+        "(هنوز پیام متنی یا ویسی در این گفتگو ثبت نشده است.)"
+        if norm_lang == "fa"
+        else "(No chat messages or transcripts recorded in this chat yet.)"
+    )
+    turns_lines: list[str] = []
+    for turn in session_turns[-10:]:
+        if len(turn) == 3:
+            u_name, q, a = turn
+            turns_lines.append(
+                f"{u_name}: {q}\nربات: {a}" if norm_lang == "fa" else f"{u_name}: {q}\nBot: {a}"
+            )
+        elif len(turn) == 2:
+            q, a = turn
+            turns_lines.append(
+                f"کاربر: {q}\nربات: {a}" if norm_lang == "fa" else f"User: {q}\nBot: {a}"
+            )
+    session_block = "\n---\n".join(turns_lines) if turns_lines else (
+        "(شروع گفتگوی جدید در همین چت)" if norm_lang == "fa" else "(Start of a fresh session)"
+    )
+
+    if norm_lang == "fa":
+        personality_hint = (
+            "الان کاربر مشخصاً درخواست تحلیل شخصیت و وایب بچه‌های همین گفتگو را کرده است! "
+            "بر اساس لحن، شوخی‌ها، دغدغه‌ها و سبک پیام‌های هر فرد در تاریخچه همین چت، "
+            "برای هر نفر یک تحلیل شخصیت بامزه، دقیق، فان، خوش‌ذوق و محترمانه (بدون توهین و با ایموجی و تیتر بولت‌پوینت) بنویس."
+            if mode == "personality"
+            else "اگر کاربر درباره شخصیت یا رفتار افراد همین گفتگو پرسید، بر اساس پیام‌های واقعی همین چت یک تحلیل بامزه، دقیق، فان و محترمانه بده؛ اگر سوال عادی یا گفتگو بود، خیلی خوش‌مشرب و خودمونی با او چت کن."
+        )
+        system_prompt = (
+            "تو هم‌صحبت هوشمند، باحال، شوخ‌طبع و دقیقِ یک گروه یا چت تلگرام هستی.\n"
+            "قوانین حیاتی:\n"
+            "۱. **ایزوله‌سازی کامل سشن:** تو فقط و فقط به پیام‌ها و سشن گفتگوی **همین چت** دسترسی داری. هیچ‌وقت اطلاعاتی از بیرون یا چت‌های دیگر حدس نزن و اگر موضوعی در تاریخچه همین گفتگو نبود، بامزه و روراست بگو هنوز تو این چت اسمی ازش نیومده.\n"
+            f"۲. {personality_hint}\n"
+            "۳. لحن تو باید کاملاً خودمونی، بانمک، روان و کوتاه باشد (نه کتابی و نه طولانی و خسته‌کننده).\n"
+            "۴. کلمات کلیدی و نام افراد را برای نمایش زیبا در تلگرام بین `**...**` بولد کن."
+        )
+        user_prompt = (
+            f"تاریخچه پیام‌های ثبت‌شده در همین چت:\n\"\"\"\n{history_block}\n\"\"\"\n\n"
+            f"ادامه گفتگوی قبلی در همین سشن:\n\"\"\"\n{session_block}\n\"\"\"\n\n"
+            f"پیام/سوال جدید از «{asker}»:\n{clean_question}"
+        )
+    else:
+        personality_hint = (
+            "The user explicitly asked for a fun personality & vibe analysis of the members in this specific chat! "
+            "Analyze each active speaker's tone, habits, and topics from this chat's history with witty, playful, respectful humor."
+            if mode == "personality"
+            else "If asked about anyone's personality or chat recap, answer playfully and accurately from this chat's messages; otherwise chat naturally with sharp, friendly wit."
+        )
+        system_prompt = (
+            "You are a witty, playful, sharp, and friendly AI companion inside a Telegram chat.\n"
+            "Critical rules:\n"
+            "1. **Strict Session Isolation:** ONLY use context from THIS chat's history and session turns. Never fabricate facts that didn't happen here.\n"
+            f"2. {personality_hint}\n"
+            "3. Keep answers punchy, conversational, fun, and concise.\n"
+            "4. Use Markdown bold (`**...**`) around names and key highlights."
+        )
+        user_prompt = (
+            f"Recorded messages in this chat:\n\"\"\"\n{history_block}\n\"\"\"\n\n"
+            f"Recent Q&A session turns:\n\"\"\"\n{session_block}\n\"\"\"\n\n"
+            f"New message from {asker}:\n{clean_question}"
+        )
+
+    return system_prompt, user_prompt

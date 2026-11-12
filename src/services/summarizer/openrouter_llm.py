@@ -1,4 +1,4 @@
-"""OpenRouter Free LLM Summarizer Fallback Provider."""
+"""OpenRouter Free LLM Summarizer & Chat Q&A Fallback Provider."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import httpx
 from src.exceptions import ProviderError
 from src.services.stt.base import normalize_language
 from src.services.summarizer.base import SummaryResult
-from src.services.summarizer.prompts import build_summary_prompt
+from src.services.summarizer.prompts import build_chat_qa_prompt, build_summary_prompt
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 class OpenRouterSummarizerProvider:
-    """Summarizes transcripts using OpenRouter free-tier models."""
+    """Summarizes transcripts and handles chat Q&A using OpenRouter free-tier models."""
 
     name = "openrouter-llm"
 
@@ -29,13 +29,13 @@ class OpenRouterSummarizerProvider:
         self._client = client
         self._timeout = timeout
 
-    async def summarize(
-        self, transcript: str, speaker_name: str, language: str
+    async def _generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        norm_lang: str,
+        temperature: float = 0.3,
     ) -> SummaryResult:
-        norm_lang = normalize_language(language, transcript)
-        system_prompt, user_prompt = build_summary_prompt(
-            transcript=transcript, speaker_name=speaker_name, language=norm_lang
-        )
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -46,7 +46,7 @@ class OpenRouterSummarizerProvider:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": 0.3,
+            "temperature": temperature,
         }
 
         try:
@@ -69,15 +69,44 @@ class OpenRouterSummarizerProvider:
 
         data = response.json()
         try:
-            summary_text = (
+            output_text = (
                 data["choices"][0]["message"]["content"] or ""
             ).strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError(f"OpenRouter unexpected response: {data}") from exc
 
-        if not summary_text:
-            raise ProviderError("OpenRouter returned empty summary")
+        if not output_text:
+            raise ProviderError("OpenRouter returned empty response")
 
         return SummaryResult(
-            summary=summary_text, language=norm_lang, provider=self.name
+            summary=output_text, language=norm_lang, provider=self.name
         )
+
+    async def summarize(
+        self, transcript: str, speaker_name: str, language: str
+    ) -> SummaryResult:
+        norm_lang = normalize_language(language, transcript)
+        system_prompt, user_prompt = build_summary_prompt(
+            transcript=transcript, speaker_name=speaker_name, language=norm_lang
+        )
+        return await self._generate(system_prompt, user_prompt, norm_lang, temperature=0.3)
+
+    async def chat(
+        self,
+        chat_history: str,
+        session_turns: list[tuple[str, str]],
+        question: str,
+        asker_name: str,
+        mode: str = "chat",
+        language: str = "fa",
+    ) -> SummaryResult:
+        norm_lang = normalize_language(language, f"{question}\n{chat_history}")
+        system_prompt, user_prompt = build_chat_qa_prompt(
+            chat_history=chat_history,
+            session_turns=session_turns,
+            question=question,
+            asker_name=asker_name,
+            mode=mode,
+            language=norm_lang,
+        )
+        return await self._generate(system_prompt, user_prompt, norm_lang, temperature=0.7)

@@ -1,4 +1,4 @@
-"""Base types and protocols for LLM summarizer providers."""
+"""Base types and protocols for LLM summarizer and interactive chat providers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Protocol
 
 @dataclass(slots=True)
 class SummaryResult:
-    """Result of summarizing a voice transcript."""
+    """Result of summarizing a transcript or answering a chat query."""
 
     summary: str
     language: str
@@ -16,7 +16,7 @@ class SummaryResult:
 
 
 class SummarizerProvider(Protocol):
-    """Protocol implemented by all LLM summarizer providers."""
+    """Protocol implemented by all LLM providers."""
 
     name: str
 
@@ -24,3 +24,14 @@ class SummarizerProvider(Protocol):
         self, transcript: str, speaker_name: str, language: str
     ) -> SummaryResult:
         """Summarize transcript with speaker attribution in the target language."""
+
+    async def chat(
+        self,
+        chat_history: str,
+        session_turns: list[tuple[str, str]],
+        question: str,
+        asker_name: str,
+        mode: str = "chat",
+        language: str = "fa",
+    ) -> SummaryResult:
+        """Generate a fun conversational reply grounded strictly in this chat's isolated history."""

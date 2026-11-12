@@ -1,7 +1,8 @@
-"""Telegram bot handlers for voice/audio messages, chat history summaries, replies, and inline callbacks."""
+"""Telegram bot handlers for voice/audio summaries, chat history, interactive Q&A, and feedback."""
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import tempfile
@@ -13,15 +14,22 @@ from aiogram.filters import Command
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    InlineKeyboardMarkup,
     Message,
     ReplyKeyboardRemove,
 )
 
-from src.bot.cache import MAX_CHAT_HISTORY_PER_CHAT, TranscriptCache, chunk_text
+from src.bot.cache import (
+    MAX_CHAT_HISTORY_PER_CHAT,
+    FeedbackEntry,
+    TranscriptCache,
+    chunk_text,
+)
 from src.bot.extractors import extract_speaker_name, extract_voice_target
 from src.bot.formatting import format_telegram_html
 from src.bot.keyboards import (
     build_chat_summary_reply_keyboard,
+    build_feedback_keyboard,
     build_transcript_keyboard,
 )
 from src.exceptions import FileTooLargeError, ProviderChainExhaustedError
@@ -64,7 +72,34 @@ _COMMAND_PREFIXES = (
     "/summary_50",
     "/summary_100",
     "/summary_150",
+    "/ask",
+    "/vibe",
+    "/personality",
+    "/reset_chat",
+    "/feedbacks",
+    "/set_admin",
 )
+
+_PERSONALITY_KEYWORDS = (
+    "شخصیت",
+    "روانشناسی",
+    "کاراکتر",
+    "وایب",
+    "اخلاق",
+    "تیپ شخصیتی",
+    "personality",
+    "vibe",
+    "character",
+    "roast",
+)
+
+_OUTPUT_TYPE_LABELS = {
+    "voice_summary": "📝 خلاصه متنی ویس",
+    "tts_voice": "🔊 نسخه صوتی خلاصه (TTS)",
+    "transcript": "📜 متن کامل ویس",
+    "chat_summary": "📊 خلاصه پیام‌های گروه/چنل",
+    "chat_qa": "💬 چت تعاملی و شخصیت‌شناسی",
+}
 
 _PERSIAN_DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
@@ -91,13 +126,52 @@ def _is_bottom_keyboard_selection(raw_text: str) -> bool:
     return (
         text.startswith("📊 خلاصه")
         or text.startswith("🔥 خلاصه")
-        or bool(
-            re.match(
-                r"^خلاصه\s+[۰-۹0-9]+\s+پیام",
-                text,
-            )
-        )
+        or bool(re.match(r"^خلاصه\s+[۰-۹0-9]+\s+پیام", text))
     )
+
+
+def _get_chat_title(message: Any) -> str:
+    chat = getattr(message, "chat", None)
+    if chat is None:
+        return "چت خصوصی"
+    title = getattr(chat, "title", None)
+    if title:
+        return str(title).strip()
+    first = getattr(chat, "first_name", None) or getattr(chat, "username", None)
+    return str(first).strip() if first else f"چت {getattr(chat, 'id', 'private')}"
+
+
+def _strip_bot_mention_and_command(
+    raw_text: str, bot_username: str | None = None
+) -> str:
+    """Remove leading /ask, /vibe, /personality command or @bot_username mention from query."""
+    text = (raw_text or "").strip()
+    clean_username = (bot_username or "vaez_summary_bot").lstrip("@").strip()
+    if clean_username:
+        text = re.sub(
+            rf"@{re.escape(clean_username)}\b", "", text, flags=re.IGNORECASE
+        )
+    text = re.sub(
+        r"^/(?:ask|vibe|personality)(?:@\S+)?\s*", "", text, flags=re.IGNORECASE
+    )
+    return " ".join(text.split())
+
+
+def _mentions_bot(
+    raw_text: str,
+    bot_username: str | None = None,
+    bot_first_name: str | None = None,
+) -> bool:
+    lowered = (raw_text or "").strip().lower()
+    if not lowered:
+        return False
+    clean_username = (bot_username or "vaez_summary_bot").lstrip("@").strip().lower()
+    if clean_username and clean_username in lowered:
+        return True
+    clean_first = (bot_first_name or "voice-summary").strip().lower()
+    if clean_first and len(clean_first) >= 4 and clean_first in lowered:
+        return True
+    return False
 
 
 def _is_explicit_summary_text(
@@ -105,7 +179,7 @@ def _is_explicit_summary_text(
     bot_username: str | None = None,
     bot_first_name: str | None = None,
 ) -> bool:
-    """Return True only when text explicitly mentions the bot or is a direct summary command/phrase."""
+    """Return True when a voice reply text explicitly requests voice summarization."""
     text = (raw_text or "").strip().lower()
     if not text:
         return False
@@ -113,16 +187,11 @@ def _is_explicit_summary_text(
     first_token = text.split()[0]
     if any(
         first_token == cmd or first_token.startswith(f"{cmd}@")
-        for cmd in _COMMAND_PREFIXES
+        for cmd in ("/summary", "/summarize", "/خلاصه")
     ):
         return True
 
-    clean_username = (bot_username or "vaez_summary_bot").lstrip("@").strip().lower()
-    if clean_username and clean_username in text:
-        return True
-
-    clean_first_name = (bot_first_name or "voice-summary").strip().lower()
-    if clean_first_name and clean_first_name in text:
+    if _mentions_bot(text, bot_username=bot_username, bot_first_name=bot_first_name):
         return True
 
     normalized = re.sub(r"[?؟!.،,\-_]+", " ", text)
@@ -176,6 +245,43 @@ def should_trigger_on_reply(
     )
 
 
+def should_trigger_chat_interaction(
+    message: Any,
+    bot_id: int | None = None,
+    bot_username: str | None = None,
+    bot_first_name: str | None = None,
+) -> bool:
+    """Return True if message should trigger interactive per-chat Q&A / fun conversation."""
+    sender = getattr(message, "from_user", None)
+    if getattr(sender, "is_bot", False):
+        return False
+
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    if not text or text.startswith("/") or _is_bottom_keyboard_selection(text):
+        return False
+
+    chat = getattr(message, "chat", None)
+    chat_type = getattr(chat, "type", "private")
+    if chat_type == "private":
+        return True
+
+    replied = getattr(message, "reply_to_message", None)
+    if replied is not None:
+        replied_user = getattr(replied, "from_user", None)
+        if replied_user is not None and getattr(replied_user, "is_bot", False):
+            replied_id = getattr(replied_user, "id", None)
+            replied_username = (getattr(replied_user, "username", None) or "").lower()
+            target_username = (bot_username or "vaez_summary_bot").lstrip("@").lower()
+            if (bot_id is not None and replied_id == bot_id) or (
+                target_username and replied_username == target_username
+            ):
+                return True
+
+    return _mentions_bot(
+        text, bot_username=bot_username, bot_first_name=bot_first_name
+    )
+
+
 def _should_record_text(text: str) -> bool:
     if not text or text.startswith("/") or _is_bottom_keyboard_selection(text):
         return False
@@ -187,7 +293,7 @@ def _should_record_text(text: str) -> bool:
 
 
 def record_incoming_chat_message(message: Any, cache: TranscriptCache) -> None:
-    """Record non-command text/caption messages from a chat or channel into the rolling 150-message store."""
+    """Record non-command text/caption messages strictly in that chat's isolated 150-msg store."""
     sender_user = getattr(message, "from_user", None)
     if getattr(sender_user, "is_bot", False):
         return
@@ -197,7 +303,6 @@ def record_incoming_chat_message(message: Any, cache: TranscriptCache) -> None:
     if chat_id is None:
         return
 
-    # Also capture replied-to message text if someone replies to an earlier message in the group
     replied = getattr(message, "reply_to_message", None)
     if replied is not None:
         replied_sender = getattr(replied, "from_user", None)
@@ -234,6 +339,25 @@ def _build_voice_dedup_key(message: Any, media: Any) -> str:
     return f"{chat_id if chat_id is not None else 'private'}:{file_uid}"
 
 
+def _build_voice_summary_markup(
+    cache: TranscriptCache, cache_id: str, entry: Any
+) -> InlineKeyboardMarkup | None:
+    """Build current inline keyboard state for a voice summary (unused action + feedback)."""
+    show_feedback = False
+    if entry.fb_id:
+        fb_entry = cache.get_feedback_target(entry.fb_id)
+        show_feedback = fb_entry is not None and fb_entry.rating is None
+
+    return build_transcript_keyboard(
+        cache_id=cache_id,
+        language=entry.language,
+        show_tts=not entry.tts_used,
+        show_transcript=not entry.transcript_used,
+        show_feedback=show_feedback,
+        fb_id=entry.fb_id,
+    )
+
+
 async def process_voice_request(
     message: Any,
     bot: Any,
@@ -264,7 +388,7 @@ async def process_voice_request(
         logger.info("Skipping duplicate/in-flight summary request for voice_key=%s", voice_key)
         return
 
-    status_msg = await message.reply(f"⏳ در حال خلاصه‌سازی ویس «{speaker_name}»...")
+    status_msg = await message.reply(f"⏳ در حال خلاصه‌سازی ویس «{html.escape(speaker_name, quote=False)}»...")
     tmp_path: Path | None = None
 
     try:
@@ -299,8 +423,25 @@ async def process_voice_request(
             summary=summary_result.summary,
             language=summary_result.language,
         )
+        fb_id = cache.create_feedback_target(
+            output_type="voice_summary",
+            chat_id=chat_id if chat_id is not None else "private",
+            chat_title=_get_chat_title(message),
+            preview=summary_result.summary,
+            language=summary_result.language,
+            linked_transcript_cache_id=cache_id,
+        )
+        entry = cache.get(cache_id)
+        if entry is not None:
+            entry.fb_id = fb_id
+
         keyboard = build_transcript_keyboard(
-            cache_id=cache_id, language=summary_result.language
+            cache_id=cache_id,
+            language=summary_result.language,
+            show_tts=True,
+            show_transcript=True,
+            show_feedback=True,
+            fb_id=fb_id,
         )
 
         await status_msg.edit_text(
@@ -364,7 +505,7 @@ async def _run_chat_history_summary(
     cache: TranscriptCache,
     origin_message: Any = None,
 ) -> None:
-    """Summarize the last `requested_count` (up to 150) messages, delete status message, and output summary."""
+    """Summarize the last `requested_count` (up to 150) messages for `chat_id` (no TTS, with feedback)."""
     clamped_count = max(1, min(int(requested_count), MAX_CHAT_SUMMARY_MESSAGES))
     entries = cache.get_recent_chat_messages(chat_id, limit=clamped_count)
     if not entries:
@@ -392,11 +533,19 @@ async def _run_chat_history_summary(
             speaker_name=f"{CHAT_HISTORY_SPEAKER_PREFIX}{actual_count}",
             language="fa",
         )
+        fb_id = cache.create_feedback_target(
+            output_type="chat_summary",
+            chat_id=chat_id,
+            chat_title=_get_chat_title(origin_message or status_updater),
+            preview=summary_result.summary,
+            language=summary_result.language,
+        )
+        fb_keyboard = build_feedback_keyboard(fb_id, language=summary_result.language)
         await _delete_and_send_output(
             origin_message=origin_message,
             status_msg=status_updater,
             text=format_telegram_html(summary_result.summary),
-            reply_markup=None,
+            reply_markup=fb_keyboard,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to summarize chat history: %s", exc)
@@ -405,6 +554,72 @@ async def _run_chat_history_summary(
             status_msg=status_updater,
             text="❌ متأسفانه در خلاصه‌سازی پیام‌های گفتگو خطایی رخ داد. لطفاً چند لحظه دیگر دوباره تلاش کنید.",
             reply_markup=None,
+        )
+
+
+async def handle_chat_interaction(
+    message: Any,
+    summarizer_manager: SummarizerManager,
+    cache: TranscriptCache,
+    bot_username: str | None = None,
+    mode: str = "chat",
+) -> None:
+    """Answer fun questions, analyze member personalities, or chat using ONLY `chat_id`'s isolated session."""
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", "private")
+    raw_text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    question = _strip_bot_mention_and_command(raw_text, bot_username=bot_username)
+
+    if mode == "personality" and not question:
+        question = "شخصیت و وایب اعضای فعال این گفتگو رو با لحن بامزه و فان تحلیل کن!"
+    elif not question:
+        await message.reply(
+            format_telegram_html(
+                "😎 پایه‌ام! هر سوالی درباره **بچه‌های همین گفتگو**، **شخصیت بقیه** یا **خلاصه اتفاقات چت** داری بپرس یا همین الان باهام گپ بزن!"
+            )
+        )
+        return
+
+    detected_mode = mode
+    if detected_mode == "chat" and any(kw in question.lower() for kw in _PERSONALITY_KEYWORDS):
+        detected_mode = "personality"
+
+    asker_name = extract_speaker_name(message)
+    recent_messages = cache.get_recent_chat_messages(chat_id, limit=MAX_CHAT_SUMMARY_MESSAGES)
+    chat_history = "\n".join(f"[{m.sender}]: {m.text}" for m in recent_messages)
+    session_turns = cache.get_chat_session_turns(chat_id)
+
+    try:
+        result = await summarizer_manager.chat(
+            chat_history=chat_history,
+            session_turns=session_turns,
+            question=question,
+            asker_name=asker_name,
+            mode=detected_mode,
+            language="fa",
+        )
+        cache.add_chat_turn(
+            chat_id=chat_id,
+            user_name=asker_name,
+            question=question,
+            answer=result.summary,
+        )
+        fb_id = cache.create_feedback_target(
+            output_type="chat_qa",
+            chat_id=chat_id,
+            chat_title=_get_chat_title(message),
+            preview=result.summary,
+            language=result.language,
+        )
+        fb_keyboard = build_feedback_keyboard(fb_id, language=result.language)
+        await message.reply(
+            format_telegram_html(result.summary),
+            reply_markup=fb_keyboard,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Chat interaction failed for chat_id=%s: %s", chat_id, exc)
+        await message.reply(
+            "❌ الان مغزم یکم شلوغ شد، چند لحظه دیگه دوباره سوالتو بپرس!"
         )
 
 
@@ -429,7 +644,6 @@ async def handle_chat_summary_command(
         cache.set_prompt_message_id(chat_id, getattr(prompt_msg, "message_id", None))
         return
 
-    # Delete previous prompt message if one was sent
     prev_prompt_id = cache.pop_prompt_message_id(chat_id)
     bot = getattr(message, "bot", None)
     if prev_prompt_id is not None and bot is not None and hasattr(bot, "delete_message"):
@@ -483,17 +697,12 @@ async def handle_chat_summary_callback(
 
 
 async def _update_message_buttons(
-    msg: Any, cache_id: str, entry: Any
+    msg: Any, cache: TranscriptCache, cache_id: str, entry: Any
 ) -> None:
-    """Update the inline keyboard on the summary message to remove already-clicked buttons."""
+    """Update the inline keyboard on a voice summary message cleanly."""
     if msg is None or not hasattr(msg, "edit_reply_markup"):
         return
-    updated_markup = build_transcript_keyboard(
-        cache_id=cache_id,
-        language=entry.language,
-        show_tts=not entry.tts_used,
-        show_transcript=not entry.transcript_used,
-    )
+    updated_markup = _build_voice_summary_markup(cache, cache_id, entry)
     try:
         await msg.edit_reply_markup(reply_markup=updated_markup)
     except Exception as exc:  # noqa: BLE001
@@ -503,7 +712,7 @@ async def _update_message_buttons(
 async def handle_transcript_callback(
     callback: Any, cache: TranscriptCache
 ) -> None:
-    """Send the cached full transcript once and disable the transcript button."""
+    """Send the cached full transcript once (with feedback buttons) and disable transcript button."""
     data = getattr(callback, "data", "") or ""
     cache_id = data.split(":", 1)[1] if ":" in data else ""
     entry = cache.get(cache_id)
@@ -521,20 +730,36 @@ async def handle_transcript_callback(
 
     entry.transcript_used = True
     msg = getattr(callback, "message", None)
-    await _update_message_buttons(msg, cache_id, entry)
+    await _update_message_buttons(msg, cache, cache_id, entry)
     await callback.answer()
 
     header = f"📜 متن کامل صحبت‌های {entry.speaker_name}:\n\n"
     chunks = chunk_text(header + entry.text, max_len=4000)
     if msg is not None:
-        for chunk in chunks:
-            await msg.reply(chunk)
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", "private")
+        fb_id = cache.create_feedback_target(
+            output_type="transcript",
+            chat_id=chat_id,
+            chat_title=_get_chat_title(msg),
+            preview=header + entry.text,
+            language=entry.language,
+        )
+        fb_markup = build_feedback_keyboard(fb_id, language=entry.language)
+
+        for idx, chunk in enumerate(chunks):
+            safe_chunk = html.escape(chunk, quote=False)
+            is_last = idx == len(chunks) - 1
+            if is_last:
+                await msg.reply(safe_chunk, reply_markup=fb_markup)
+            else:
+                await msg.reply(safe_chunk)
 
 
 async def handle_tts_callback(
     callback: Any, cache: TranscriptCache, tts_manager: TTSManager
 ) -> None:
-    """Synthesize and send the voice summary once and disable the audio summary button."""
+    """Synthesize and send the voice summary (with feedback buttons) and disable TTS button."""
     data = getattr(callback, "data", "") or ""
     cache_id = data.split(":", 1)[1] if ":" in data else ""
     entry = cache.get(cache_id)
@@ -552,7 +777,7 @@ async def handle_tts_callback(
 
     entry.tts_used = True
     msg = getattr(callback, "message", None)
-    await _update_message_buttons(msg, cache_id, entry)
+    await _update_message_buttons(msg, cache, cache_id, entry)
     await callback.answer("🔊 در حال تولید فایل صوتی خلاصه...")
 
     if msg is None:
@@ -571,12 +796,122 @@ async def handle_tts_callback(
         audio_file = BufferedInputFile(
             tts_result.audio_bytes, filename=f"summary_{cache_id}.{ext}"
         )
-        await msg.reply_voice(voice=audio_file, caption=caption)
+        chat = getattr(msg, "chat", None)
+        chat_id = getattr(chat, "id", "private")
+        tts_fb_id = cache.create_feedback_target(
+            output_type="tts_voice",
+            chat_id=chat_id,
+            chat_title=_get_chat_title(msg),
+            preview=entry.summary,
+            language=entry.language,
+        )
+        tts_fb_markup = build_feedback_keyboard(tts_fb_id, language=entry.language)
+        await msg.reply_voice(
+            voice=audio_file,
+            caption=html.escape(caption, quote=False),
+            reply_markup=tts_fb_markup,
+        )
     except Exception as exc:  # noqa: BLE001
         entry.tts_used = False
-        await _update_message_buttons(msg, cache_id, entry)
+        await _update_message_buttons(msg, cache, cache_id, entry)
         logger.error("Failed to generate TTS audio summary: %s", exc)
         await msg.reply("❌ متأسفانه در تولید فایل صوتی خلاصه خطایی رخ داد.")
+
+
+def _format_admin_feedback_notification(entry: FeedbackEntry) -> str:
+    rating_label = "👍 عالی / مثبت" if entry.rating == "up" else "👎 ضعیف / نیاز به بهبود"
+    type_label = _OUTPUT_TYPE_LABELS.get(entry.output_type, entry.output_type)
+    username_str = f" (@{entry.voter_username})" if entry.voter_username else ""
+    md_text = (
+        "📊 **بازخورد جدید دریافت شد!**\n\n"
+        f"• **امتیاز:** {rating_label}\n"
+        f"• **نوع خروجی:** {type_label}\n"
+        f"• **چت / گروه:** {entry.chat_title} (`{entry.chat_id}`)\n"
+        f"• **کاربر:** {entry.voter_name}{username_str}\n"
+        f"• **پیش‌نمایش خروجی:**\n`{entry.preview}`"
+    )
+    return format_telegram_html(md_text)
+
+
+async def handle_feedback_callback(
+    callback: Any, cache: TranscriptCache
+) -> None:
+    """Record thumbs up/down feedback once, make feedback buttons vanish, and notify admin."""
+    data = getattr(callback, "data", "") or ""
+    parts = data.split(":")
+    if len(parts) < 3:
+        await callback.answer("داده بازخورد نامعتبر است.")
+        return
+
+    fb_id = parts[1]
+    rating = parts[2]
+    voter = getattr(callback, "from_user", None)
+    voter_id = getattr(voter, "id", None)
+    voter_name = (
+        getattr(voter, "full_name", None)
+        or getattr(voter, "first_name", None)
+        or "کاربر"
+    )
+    voter_username = getattr(voter, "username", None)
+
+    entry, already_voted = cache.record_feedback(
+        fb_id=fb_id,
+        rating=rating,
+        voter_id=voter_id,
+        voter_name=voter_name,
+        voter_username=voter_username,
+    )
+
+    msg = getattr(callback, "message", None)
+    if entry is None:
+        if msg is not None and hasattr(msg, "edit_reply_markup"):
+            try:
+                await msg.edit_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                pass
+        await callback.answer("ممنون! بازخوردت ثبت شد 🙏")
+        return
+
+    # Remove feedback buttons (preserving unused TTS/Transcript buttons on voice summary)
+    if msg is not None and hasattr(msg, "edit_reply_markup"):
+        new_markup: InlineKeyboardMarkup | None = None
+        if entry.linked_transcript_cache_id:
+            linked = cache.get(entry.linked_transcript_cache_id)
+            if linked is not None:
+                new_markup = build_transcript_keyboard(
+                    cache_id=entry.linked_transcript_cache_id,
+                    language=linked.language,
+                    show_tts=not linked.tts_used,
+                    show_transcript=not linked.transcript_used,
+                    show_feedback=False,
+                    fb_id=fb_id,
+                )
+        try:
+            await msg.edit_reply_markup(reply_markup=new_markup)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not remove feedback markup for %s: %s", fb_id, exc)
+
+    if already_voted:
+        await callback.answer("بازخورد این پیام قبلاً ثبت شده است 🙏")
+        return
+
+    ack_text = (
+        "👍 مرسی! خوشحالم که راضی بودی"
+        if entry.rating == "up"
+        else "📝 ممنون! بازخوردت ثبت شد تا بهتر بشم"
+    )
+    await callback.answer(ack_text)
+
+    admin_chat_id = cache.get_admin_chat_id()
+    bot = getattr(msg, "bot", None) if msg is not None else getattr(callback, "bot", None)
+    if admin_chat_id is not None and bot is not None and hasattr(bot, "send_message"):
+        try:
+            await bot.send_message(
+                chat_id=admin_chat_id,
+                text=_format_admin_feedback_notification(entry),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to deliver feedback notification to admin %s: %s", admin_chat_id, exc)
 
 
 def create_bot_router(
@@ -586,28 +921,107 @@ def create_bot_router(
     tts_manager: TTSManager | None = None,
     max_file_size_mb: int = 20,
 ) -> Router:
-    """Create and wire the aiogram Router with all commands, voice handlers, chat history, and callbacks."""
+    """Create and wire the aiogram Router with all commands, chat Q&A, voice handlers, and callbacks."""
     router = Router(name="voice_summary_router")
-    bot_identity: dict[str, str | None] = {"username": None, "first_name": None}
+    bot_identity: dict[str, Any] = {"id": None, "username": None, "first_name": None}
 
     async def _ensure_bot_identity(message: Message) -> None:
         if bot_identity["username"] is None and message.bot is not None:
             me = await message.bot.get_me()
+            bot_identity["id"] = getattr(me, "id", None)
             bot_identity["username"] = getattr(me, "username", None)
             bot_identity["first_name"] = getattr(me, "first_name", None)
 
     @router.message(Command("start", "help"))
     async def cmd_start(message: Message) -> None:
         welcome = (
-            "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس و پیام‌های گروه و کانال هستم.\n\n"
+            "👋 سلام! من ربات هوشمند خلاصه‌ساز ویس، پیام‌های گروه و هم‌صحبت فان شما هستم.\n\n"
             "✨ **قابلیت‌های من:**\n"
-            "۱. 🎙️ **خلاصه‌سازی ویس در چت خصوصی:** هر ویس یا فایل صوتی را مستقیم برایم بفرست یا فوروارد کن.\n"
-            "۲. 👥 **خلاصه‌سازی ویس در گروه‌ها:** روی هر ویسی ریپلای بزن و بنویس `خلاصه` (یا دستور `/summary` یا منشن `@vaez_summary_bot`).\n"
-            "۳. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (۱۰ تا ۱۵۰ پیام آخر):** دستور `/chat_summary` را بزن تا دکمه‌های انتخاب تعداد در پایین صفحه (قسمت تایپ) باز شود، یا مستقیم از منوی `/` دستورات `/summary_10` تا `/summary_150` را انتخاب کن!\n"
-            "۴. 🔊 **خلاصه صوتی ویس‌ها:** زیر خلاصه ویس‌ها می‌توانی نسخه صوتی طبیعی را هم بشنوی.\n\n"
-            "⚠️ **نکته مهم در گروه‌ها:** حتماً ربات را در گروه **Admin (ادمین)** کنید تا بتواند پیام‌های گروه را ببیند و خلاصه کند."
+            "۱. 🎙️ **خلاصه‌سازی ویس در چت خصوصی:** هر ویس یا فایل صوتی را مستقیم برایم بفرست.\n"
+            "۲. 👥 **خلاصه‌سازی ویس در گروه‌ها:** روی هر ویسی ریپلای بزن و بنویس `خلاصه` (یا `/summary` یا `@vaez_summary_bot`).\n"
+            "۳. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (۱۰ تا ۱۵۰ پیام آخر):** با `/chat_summary` تعداد پیام را انتخاب کن.\n"
+            "۴. 😎 **چت تعاملی و تحلیل شخصیت بقیه (سشن جداگانه برای هر چت):**\n"
+            "   • با دستور `/vibe` شخصیت و وایب بچه‌های همین چت را بامزه تحلیل می‌کنم!\n"
+            "   • در پیوی مستقیم باهام چت کن یا در گروه با `@vaez_summary_bot سوالت` و یا ریپلای روی پیام‌های من درباره گروه سوال بپرس!\n"
+            "۵. 🔊 **خلاصه صوتی ویس‌ها** + **دکمه‌های بازخورد** زیر هر خروجی."
         )
         await message.reply(format_telegram_html(welcome))
+
+    @router.message(Command("set_admin"))
+    async def cmd_set_admin(message: Message) -> None:
+        current_admin = cache.get_admin_chat_id()
+        user_id = getattr(getattr(message, "from_user", None), "id", None)
+        chat_id = getattr(getattr(message, "chat", None), "id", None)
+        if user_id is None or chat_id is None:
+            return
+        if current_admin is not None and current_admin != user_id:
+            await message.reply("⛔ ادمین دریافت‌کننده بازخوردها قبلاً توسط مالک ربات ثبت شده است.")
+            return
+        target_chat = user_id if getattr(message.chat, "type", "private") == "private" else user_id
+        cache.set_admin_chat_id(target_chat)
+        await message.reply(
+            format_telegram_html(
+                f"✅ **تنظیم شد!** از این به بعد خروجی تمام بازخوردهای 👍/👎 بلافاصله برای شما (`{target_chat}`) ارسال می‌شود.\n"
+                "همچنین هر زمان با دستور `/feedbacks` می‌توانید آمار کل بازخوردها را ببینید."
+            )
+        )
+
+    @router.message(Command("feedbacks"))
+    async def cmd_feedbacks(message: Message) -> None:
+        admin_id = cache.get_admin_chat_id()
+        user_id = getattr(getattr(message, "from_user", None), "id", None)
+        if admin_id is not None and user_id != admin_id:
+            await message.reply("⛔ مشاهده گزارش کامل بازخوردها فقط برای ادمین ربات مجاز است.")
+            return
+        stats = cache.get_feedback_stats()
+        total = stats["total"]
+        up = stats["up"]
+        down = stats["down"]
+        pct = round((up / total) * 100) if total else 0
+        lines = [
+            "📊 **گزارش کلی بازخوردهای کاربران:**",
+            f"• کل بازخوردها: **{total}** | 👍 عالی: **{up}** | 👎 ضعیف: **{down}** | رضایت: **{pct}%**",
+        ]
+        recent: list[FeedbackEntry] = stats["recent"]
+        if recent:
+            lines.append("\n🕒 **آخرین بازخوردها:**")
+            for item in reversed(recent[-8:]):
+                icon = "👍" if item.rating == "up" else "👎"
+                tlabel = _OUTPUT_TYPE_LABELS.get(item.output_type, item.output_type)
+                lines.append(
+                    f"• {icon} {tlabel} | **{item.voter_name}** در **{item.chat_title}**: `{item.preview[:60]}`"
+                )
+        else:
+            lines.append("\nهنوز بازخوردی ثبت نشده است.")
+        await message.reply(format_telegram_html("\n".join(lines)))
+
+    @router.message(Command("vibe", "personality"))
+    async def cmd_vibe(message: Message) -> None:
+        await _ensure_bot_identity(message)
+        await handle_chat_interaction(
+            message=message,
+            summarizer_manager=summarizer_manager,
+            cache=cache,
+            bot_username=bot_identity["username"],
+            mode="personality",
+        )
+
+    @router.message(Command("ask"))
+    async def cmd_ask(message: Message) -> None:
+        await _ensure_bot_identity(message)
+        await handle_chat_interaction(
+            message=message,
+            summarizer_manager=summarizer_manager,
+            cache=cache,
+            bot_username=bot_identity["username"],
+            mode="chat",
+        )
+
+    @router.message(Command("reset_chat"))
+    async def cmd_reset_chat(message: Message) -> None:
+        chat_id = getattr(getattr(message, "chat", None), "id", "private")
+        cache.clear_chat_session(chat_id)
+        await message.reply("🧹 حافظه گفتگوی تعاملی این سشن ریست شد! هر وقت خواستید بحث جدید را شروع کنید.")
 
     @router.message(
         Command(
@@ -664,7 +1078,7 @@ def create_bot_router(
             )
 
     @router.message(F.reply_to_message)
-    async def on_reply_to_voice(message: Message) -> None:
+    async def on_reply_to_message(message: Message) -> None:
         text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
         if _is_bottom_keyboard_selection(text):
             await handle_chat_summary_command(
@@ -674,8 +1088,36 @@ def create_bot_router(
             )
             return
 
-        record_incoming_chat_message(message, cache)
         await _ensure_bot_identity(message)
+        replied_msg = getattr(message, "reply_to_message", None)
+        replied_user = getattr(replied_msg, "from_user", None)
+        replied_is_self = bool(
+            replied_user is not None
+            and getattr(replied_user, "is_bot", False)
+            and (
+                (bot_identity["id"] is not None and getattr(replied_user, "id", None) == bot_identity["id"])
+                or (
+                    bot_identity["username"]
+                    and (getattr(replied_user, "username", None) or "").lower()
+                    == str(bot_identity["username"]).lower()
+                )
+            )
+        )
+
+        if replied_is_self and should_trigger_chat_interaction(
+            message,
+            bot_id=bot_identity["id"],
+            bot_username=bot_identity["username"],
+            bot_first_name=bot_identity["first_name"],
+        ):
+            await handle_chat_interaction(
+                message=message,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+                bot_username=bot_identity["username"],
+            )
+            return
+
         if should_trigger_on_reply(
             message,
             bot_username=bot_identity["username"],
@@ -689,6 +1131,24 @@ def create_bot_router(
                 cache=cache,
                 max_file_size_mb=max_file_size_mb,
             )
+            return
+
+        if should_trigger_chat_interaction(
+            message,
+            bot_id=bot_identity["id"],
+            bot_username=bot_identity["username"],
+            bot_first_name=bot_identity["first_name"],
+        ):
+            record_incoming_chat_message(replied_msg, cache)
+            await handle_chat_interaction(
+                message=message,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+                bot_username=bot_identity["username"],
+            )
+            return
+
+        record_incoming_chat_message(message, cache)
 
     @router.channel_post()
     async def on_channel_post(message: Message) -> None:
@@ -716,7 +1176,27 @@ def create_bot_router(
                 cache=cache,
             )
             return
+
+        await _ensure_bot_identity(message)
+        if should_trigger_chat_interaction(
+            message,
+            bot_id=bot_identity["id"],
+            bot_username=bot_identity["username"],
+            bot_first_name=bot_identity["first_name"],
+        ):
+            await handle_chat_interaction(
+                message=message,
+                summarizer_manager=summarizer_manager,
+                cache=cache,
+                bot_username=bot_identity["username"],
+            )
+            return
+
         record_incoming_chat_message(message, cache)
+
+    @router.callback_query(F.data.startswith("fb:"))
+    async def on_feedback_button(callback: CallbackQuery) -> None:
+        await handle_feedback_callback(callback, cache)
 
     @router.callback_query(F.data.startswith("chatsum:"))
     async def on_chat_summary_button(callback: CallbackQuery) -> None:

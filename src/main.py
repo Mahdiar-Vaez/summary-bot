@@ -104,6 +104,9 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         ttl_seconds=settings.transcript_cache_ttl_seconds,
         max_items=settings.transcript_cache_max_items,
         persistence_path="data/chat_history.json",
+        feedback_path="data/feedbacks.json",
+        admin_config_path="data/admin_config.json",
+        admin_chat_id=settings.admin_chat_id,
     )
     dp = Dispatcher()
     dp.include_router(
@@ -123,18 +126,17 @@ async def configure_bot_profile(bot: Bot) -> None:
     try:
         await bot.set_my_short_description(
             short_description=(
-                "🎙️ خلاصه‌ساز هوشمند ویس (متنی و صوتی) + خلاصه‌ساز ۱۰ تا ۱۵۰ پیام آخر گروه و چنل 💬"
+                "🎙️ خلاصه‌ساز ویس + 💬 خلاصه‌ساز ۱۵۰ پیام آخر گروه + 😎 چت تعاملی و تحلیل شخصیت اعضا!"
             )
         )
         await bot.set_my_description(
             description=(
-                "🤖 دستیار هوشمند خلاصه‌ساز ویس و پیام‌های گروه و چنل (@vaez_summary_bot)\n\n"
+                "🤖 دستیار هوشمند خلاصه‌ساز ویس، پیام‌های گروه و هم‌صحبت فان (@vaez_summary_bot)\n\n"
                 "✨ قابلیت‌های ربات:\n"
-                "۱. 🎙️ خلاصه‌سازی فوق‌سریع ویس و فایل‌های صوتی (فارسی و انگلیسی) به زبان خودمونی و روان\n"
-                "۲. 💬 خلاصه‌سازی پیام‌های گروه و چنل (از ۱۰ تا ۱۰۰ و حداکثر ۱۵۰ پیام آخر به انتخاب شما!) با دستور /chat_summary\n"
-                "۳. 🔊 تبدیل خلاصه‌ی ویس‌ها به فایل صوتی طبیعی (شنیدن خلاصه به صورت ویس)\n"
-                "۴. 📜 دریافت متن کامل پیاده‌شده‌ی ویس‌ها\n\n"
-                "🚀 کافیست ویس بفرستید، در گروه روی ویس ریپلای بزنید، یا دستور /chat_summary را امتحان کنید!"
+                "۱. 🎙️ خلاصه‌سازی فوق‌سریع ویس (فارسی و انگلیسی) به زبان خودمونی\n"
+                "۲. 💬 خلاصه‌سازی ۱۰ تا ۱۵۰ پیام آخر گروه و چنل با دستور /chat_summary\n"
+                "۳. 😎 چت تعاملی و تحلیل شخصیت بقیه در هر چت به صورت کاملاً جداگانه (با /vibe یا /ask یا منشن @vaez_summary_bot)\n"
+                "۴. 🔊 تبدیل خلاصه‌ی ویس‌ها به ویس طبیعی فارسی + دریافت متن کامل ویس"
             )
         )
         await bot.set_my_commands(
@@ -145,23 +147,35 @@ async def configure_bot_profile(bot: Bot) -> None:
                 ),
                 BotCommand(
                     command="chat_summary",
-                    description="انتخاب تعداد پیام برای خلاصه‌سازی از کیبورد پایین",
+                    description="خلاصه‌سازی ۱۰ تا ۱۵۰ پیام آخر گروه یا چنل",
                 ),
                 BotCommand(
-                    command="summary_10",
-                    description="خلاصه‌سازی ۱۰ پیام آخر گروه یا چنل",
+                    command="vibe",
+                    description="تحلیل شخصیت و وایب فان اعضای همین گفتگو",
+                ),
+                BotCommand(
+                    command="ask",
+                    description="پرسیدن سوال درباره گفتگو یا چت با ربات",
                 ),
                 BotCommand(
                     command="summary_50",
-                    description="خلاصه‌سازی ۵۰ پیام آخر گروه یا چنل",
+                    description="خلاصه‌سازی سریع ۵۰ پیام آخر",
                 ),
                 BotCommand(
                     command="summary_100",
-                    description="خلاصه‌سازی ۱۰۰ پیام آخر گروه یا چنل",
+                    description="خلاصه‌سازی سریع ۱۰۰ پیام آخر",
                 ),
                 BotCommand(
                     command="summary_150",
-                    description="خلاصه‌سازی ۱۵۰ پیام آخر (حداکثر)",
+                    description="خلاصه‌سازی سریع ۱۵۰ پیام آخر (حداکثر)",
+                ),
+                BotCommand(
+                    command="reset_chat",
+                    description="پاک‌سازی سشن گفتگوی تعاملی همین چت",
+                ),
+                BotCommand(
+                    command="feedbacks",
+                    description="مشاهده آمار بازخوردها (مخصوص ادمین)",
                 ),
                 BotCommand(
                     command="start",
