@@ -159,6 +159,17 @@ async def test_build_chat_qa_prompt_and_manager_chat_with_fallback():
     assert "علی" in user_prompt
     assert "سلام ربات!" in user_prompt
 
+    # Verify person-specific lookup prompt in chat mode mentions matching speaker names/usernames
+    sys_lookup, _ = build_chat_qa_prompt(
+        chat_history="[سحر (@sahar)]: فردا ساعت ۶ بریم کافه",
+        session_turns=[],
+        question="سحر چی گفته؟",
+        asker_name="مهدیار",
+        mode="chat",
+        language="fa",
+    )
+    assert "سحر" in sys_lookup or "@username" in sys_lookup
+
     def gemini_fail(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text="rate limit")
 

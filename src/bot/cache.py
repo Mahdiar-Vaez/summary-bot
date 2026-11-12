@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-MAX_CHAT_HISTORY_PER_CHAT = 150
+MAX_CHAT_HISTORY_PER_CHAT = 250
 MAX_SESSION_TURNS_PER_CHAT = 20
 MAX_PERSISTED_FEEDBACKS = 500
 
@@ -271,7 +271,7 @@ class TranscriptCache:
             self._completed_voices.pop(vk, None)
 
     def add_chat_message(self, chat_id: int | str, sender: str, text: str) -> None:
-        """Append a message strictly to `chat_id`'s isolated rolling 150-message buffer."""
+        """Append a message strictly to `chat_id`'s isolated rolling buffer (>= 200 msgs)."""
         cleaned = (text or "").strip()
         if not cleaned:
             return
@@ -299,7 +299,7 @@ class TranscriptCache:
     def get_recent_chat_messages(
         self, chat_id: int | str, limit: int = MAX_CHAT_HISTORY_PER_CHAT
     ) -> list[ChatMessageEntry]:
-        """Return up to `limit` (clamped to 1..150) most recent messages strictly for `chat_id`."""
+        """Return up to `limit` (clamped to `max_messages_per_chat`) most recent messages strictly for `chat_id`."""
         clamped = max(1, min(int(limit), self.max_messages_per_chat))
         key = str(chat_id)
         history = self._chat_history.get(key)

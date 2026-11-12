@@ -126,7 +126,7 @@ async def configure_bot_profile(bot: Bot) -> None:
     try:
         await bot.set_my_short_description(
             short_description=(
-                "🎙️ خلاصه‌ساز ویس + 💬 خلاصه‌ساز ۱۵۰ پیام آخر گروه + 😎 چت تعاملی و تحلیل شخصیت اعضا!"
+                "🎙️ خلاصه‌ساز ویس + 💬 خلاصه‌ساز ۲۰۰ پیام آخر گروه + 😎 پرسش‌ و پاسخ و شخصیت‌شناسی چت!"
             )
         )
         await bot.set_my_description(
@@ -134,8 +134,8 @@ async def configure_bot_profile(bot: Bot) -> None:
                 "🤖 دستیار هوشمند خلاصه‌ساز ویس، پیام‌های گروه و هم‌صحبت فان (@vaez_summary_bot)\n\n"
                 "✨ قابلیت‌های ربات:\n"
                 "۱. 🎙️ خلاصه‌سازی فوق‌سریع ویس (فارسی و انگلیسی) به زبان خودمونی\n"
-                "۲. 💬 خلاصه‌سازی ۱۰ تا ۱۵۰ پیام آخر گروه و چنل با دستور /chat_summary\n"
-                "۳. 😎 چت تعاملی و تحلیل شخصیت بقیه در هر چت به صورت کاملاً جداگانه (با /vibe یا /ask یا منشن @vaez_summary_bot)\n"
+                "۲. 💬 خلاصه‌سازی ۱۰ تا ۲۰۰ پیام آخر گروه و چنل با دستور /chat_summary\n"
+                "۳. 😎 چت و سوال درباره صحبت‌های بچه‌های گروه (تا ۲۵۰ پیام اخیر، با سشن مجزا برای هر چت) و تحلیل تیپ شخصیت اعضا (با @vaez_summary_bot یا /ask یا /vibe)\n"
                 "۴. 🔊 تبدیل خلاصه‌ی ویس‌ها به ویس طبیعی فارسی + دریافت متن کامل ویس"
             )
         )
@@ -147,7 +147,7 @@ async def configure_bot_profile(bot: Bot) -> None:
                 ),
                 BotCommand(
                     command="chat_summary",
-                    description="خلاصه‌سازی ۱۰ تا ۱۵۰ پیام آخر گروه یا چنل",
+                    description="خلاصه‌سازی ۱۰ تا ۲۰۰ پیام آخر گروه یا چنل",
                 ),
                 BotCommand(
                     command="vibe",
@@ -155,7 +155,7 @@ async def configure_bot_profile(bot: Bot) -> None:
                 ),
                 BotCommand(
                     command="ask",
-                    description="پرسیدن سوال درباره گفتگو یا چت با ربات",
+                    description="پرسیدن سوال درباره حرف‌های بچه‌ها (مثلاً سحر چی گفته؟)",
                 ),
                 BotCommand(
                     command="summary_50",
@@ -167,7 +167,11 @@ async def configure_bot_profile(bot: Bot) -> None:
                 ),
                 BotCommand(
                     command="summary_150",
-                    description="خلاصه‌سازی سریع ۱۵۰ پیام آخر (حداکثر)",
+                    description="خلاصه‌سازی سریع ۱۵۰ پیام آخر",
+                ),
+                BotCommand(
+                    command="summary_200",
+                    description="خلاصه‌سازی سریع ۲۰۰ پیام آخر",
                 ),
                 BotCommand(
                     command="reset_chat",

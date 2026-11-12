@@ -86,6 +86,21 @@ def build_summary_prompt(
     return system_prompt, user_prompt
 
 
+MAX_CHAT_QA_HISTORY_CHARS = 48_000
+
+
+def _trim_history_to_recent_chars(chat_history: str, max_chars: int = MAX_CHAT_QA_HISTORY_CHARS) -> str:
+    """Keep the most recent lines up to `max_chars` so 200+ typical messages fit safely."""
+    clean = (chat_history or "").strip()
+    if len(clean) <= max_chars:
+        return clean
+    tail = clean[-max_chars:]
+    newline_idx = tail.find("\n")
+    if 0 <= newline_idx < len(tail) - 1:
+        tail = tail[newline_idx + 1 :]
+    return tail
+
+
 def build_chat_qa_prompt(
     chat_history: str,
     session_turns: list[tuple[str, str]],
@@ -97,9 +112,10 @@ def build_chat_qa_prompt(
     """Build (system_prompt, user_prompt) for interactive per-chat Q&A and fun personality analysis."""
     clean_question = (question or "").strip()
     asker = (asker_name or "کاربر").strip()
-    norm_lang = normalize_language(language, f"{clean_question}\n{chat_history}")
+    trimmed_history = _trim_history_to_recent_chars(chat_history)
+    norm_lang = normalize_language(language, f"{clean_question}\n{trimmed_history}")
 
-    history_block = (chat_history or "").strip() or (
+    history_block = trimmed_history or (
         "(هنوز پیام متنی یا ویسی در این گفتگو ثبت نشده است.)"
         if norm_lang == "fa"
         else "(No chat messages or transcripts recorded in this chat yet.)"
@@ -122,19 +138,26 @@ def build_chat_qa_prompt(
 
     if norm_lang == "fa":
         personality_hint = (
-            "الان کاربر مشخصاً درخواست تحلیل شخصیت و وایب بچه‌های همین گفتگو را کرده است! "
-            "بر اساس لحن، شوخی‌ها، دغدغه‌ها و سبک پیام‌های هر فرد در تاریخچه همین چت، "
-            "برای هر نفر یک تحلیل شخصیت بامزه، دقیق، فان، خوش‌ذوق و محترمانه (بدون توهین و با ایموجی و تیتر بولت‌پوینت) بنویس."
+            "کاربر الان درخواست تحلیل شخصیت و وایب داده است! "
+            "اگر در سوال اسم شخص خاصی (مثل مهدی یا سحر) آمده، تمرکز اصلی را روی تحلیل همان شخص بگذار؛ "
+            "و اگر اسم خاصی نیامده، برای اعضای فعال همین گفتگو بر اساس لحن، شوخی‌ها، دغدغه‌ها و سبک پیام‌هایشان، "
+            "تحلیل شخصیت و تیپ رفتاری بامزه، دقیق، فان و محترمانه (با ایموجی و بولت‌پوینت) بنویس."
             if mode == "personality"
-            else "اگر کاربر درباره شخصیت یا رفتار افراد همین گفتگو پرسید، بر اساس پیام‌های واقعی همین چت یک تحلیل بامزه، دقیق، فان و محترمانه بده؛ اگر سوال عادی یا گفتگو بود، خیلی خوش‌مشرب و خودمونی با او چت کن."
+            else (
+                "کاربر ممکن است درباره صحبت‌های یک شخص خاص (مثل «سحر چی گفته؟» یا «مهدی راجع به فلان موضوع چی گفت؟»)، "
+                "تیپ شخصیت افراد بر اساس پیام‌هایشان، یا جمع‌بندی بحث‌های همین چت سوال بپرسد:\n"
+                "   - اگر درباره حرف‌های شخص خاصی پرسید، تمام پیام‌ها و ویس‌های او را در تاریخچه همین چت بررسی کن و خلاصه دقیق، روشن و خودمونی صحبت‌هایش را بگو.\n"
+                "   - اگر درباره شخصیت کسی پرسید، با استناد به سبک پیام‌های واقعی‌اش در همین چت، تحلیل فان و محترمانه بده.\n"
+                "   - در تشخیص نام افراد منعطف باش (مثلاً نام کوچک، نام کامل، آیدی `@username` یا املای فارسی/انگلیسی را تطبیق بده)."
+            )
         )
         system_prompt = (
             "تو هم‌صحبت هوشمند، باحال، شوخ‌طبع و دقیقِ یک گروه یا چت تلگرام هستی.\n"
             "قوانین حیاتی:\n"
-            "۱. **ایزوله‌سازی کامل سشن:** تو فقط و فقط به پیام‌ها و سشن گفتگوی **همین چت** دسترسی داری. هیچ‌وقت اطلاعاتی از بیرون یا چت‌های دیگر حدس نزن و اگر موضوعی در تاریخچه همین گفتگو نبود، بامزه و روراست بگو هنوز تو این چت اسمی ازش نیومده.\n"
+            "۱. **ایزوله‌سازی کامل سشن:** تو فقط و فقط به پیام‌ها و سشن گفتگوی **همین چت** دسترسی داری. هیچ‌وقت اطلاعاتی از بیرون یا چت‌های دیگر حدس نزن و اگر کسی یا موضوعی در تاریخچه ثبت‌شده همین چت نبود، روراست و بامزه بگو در پیام‌های اخیر ثبت‌شده اثری از آن نبود.\n"
             f"۲. {personality_hint}\n"
-            "۳. لحن تو باید کاملاً خودمونی، بانمک، روان و کوتاه باشد (نه کتابی و نه طولانی و خسته‌کننده).\n"
-            "۴. کلمات کلیدی و نام افراد را برای نمایش زیبا در تلگرام بین `**...**` بولد کن."
+            "۳. لحن تو باید کاملاً خودمونی، بانمک، روان و جمع‌وجور باشد (نه کتابی و نه طولانی و خسته‌کننده).\n"
+            "۴. کلمات کلیدی، اسم افراد و نکات مهم را برای نمایش زیبا در تلگرام بین `**...**` بولد کن."
         )
         user_prompt = (
             f"تاریخچه پیام‌های ثبت‌شده در همین چت:\n\"\"\"\n{history_block}\n\"\"\"\n\n"
@@ -143,10 +166,14 @@ def build_chat_qa_prompt(
         )
     else:
         personality_hint = (
-            "The user explicitly asked for a fun personality & vibe analysis of the members in this specific chat! "
-            "Analyze each active speaker's tone, habits, and topics from this chat's history with witty, playful, respectful humor."
+            "The user explicitly asked for a fun personality & vibe analysis in this specific chat! "
+            "If a specific person is named in the question, focus primarily on analyzing that person; "
+            "otherwise analyze each active speaker's tone, habits, and topics from this chat's history with witty, playful, respectful humor."
             if mode == "personality"
-            else "If asked about anyone's personality or chat recap, answer playfully and accurately from this chat's messages; otherwise chat naturally with sharp, friendly wit."
+            else (
+                "The user may ask what a specific person said (e.g., 'What did Sahar say?'), someone's personality type based on the chats, or general Q&A. "
+                "Match speakers flexibly by first name, full name, or `@username`, cite their actual messages from this chat accurately, and chat naturally with sharp, friendly wit."
+            )
         )
         system_prompt = (
             "You are a witty, playful, sharp, and friendly AI companion inside a Telegram chat.\n"

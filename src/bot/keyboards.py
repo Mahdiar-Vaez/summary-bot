@@ -79,7 +79,7 @@ def build_transcript_keyboard(
 
 
 def build_chat_summary_reply_keyboard() -> ReplyKeyboardMarkup:
-    """Create a bottom input-bar ReplyKeyboardMarkup for selecting 10..150 recent messages."""
+    """Create a bottom input-bar ReplyKeyboardMarkup for selecting 10..200 recent messages."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -91,7 +91,8 @@ def build_chat_summary_reply_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📊 خلاصه ۱۰۰ پیام آخر"),
             ],
             [
-                KeyboardButton(text="🔥 خلاصه ۱۵۰ پیام آخر"),
+                KeyboardButton(text="📊 خلاصه ۱۵۰ پیام آخر"),
+                KeyboardButton(text="🔥 خلاصه ۲۰۰ پیام آخر"),
             ],
         ],
         resize_keyboard=True,

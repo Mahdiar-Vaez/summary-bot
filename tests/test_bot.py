@@ -481,15 +481,20 @@ async def test_handle_tts_and_transcript_callbacks_disable_buttons_after_click()
     assert len(sent_transcripts) == 1
 
 
-def test_chat_history_store_caps_at_150_messages_and_ignores_commands():
-    assert MAX_CHAT_SUMMARY_MESSAGES == 150
+def test_chat_history_store_caps_at_250_messages_and_ignores_commands():
+    assert MAX_CHAT_SUMMARY_MESSAGES == 250
     cache = TranscriptCache()
     chat_id = -100123456
 
-    for i in range(1, 181):
+    for i in range(1, 271):
         msg = SimpleNamespace(
             chat=SimpleNamespace(id=chat_id, type="supergroup"),
-            from_user=SimpleNamespace(full_name=f"User{i}", first_name=f"User{i}", is_bot=False),
+            from_user=SimpleNamespace(
+                full_name=f"User{i}",
+                first_name=f"User{i}",
+                username=f"user_{i}",
+                is_bot=False,
+            ),
             text=f"پیام شماره {i} درباره پروژه",
             caption=None,
         )
@@ -499,15 +504,17 @@ def test_chat_history_store_caps_at_150_messages_and_ignores_commands():
     cmd_msg = SimpleNamespace(
         chat=SimpleNamespace(id=chat_id, type="supergroup"),
         from_user=SimpleNamespace(full_name="Admin", first_name="Admin", is_bot=False),
-        text="/chat_summary 100",
+        text="/chat_summary 200",
         caption=None,
     )
     record_incoming_chat_message(cmd_msg, cache)
 
-    recent_all = cache.get_recent_chat_messages(chat_id, limit=200)
-    assert len(recent_all) == 150
-    assert recent_all[0].text == "پیام شماره 31 درباره پروژه"
-    assert recent_all[-1].text == "پیام شماره 180 درباره پروژه"
+    recent_all = cache.get_recent_chat_messages(chat_id, limit=250)
+    assert len(recent_all) == 250
+    assert len(cache.get_recent_chat_messages(chat_id, limit=200)) == 200
+    assert recent_all[0].text == "پیام شماره 21 درباره پروژه"
+    assert recent_all[-1].text == "پیام شماره 270 درباره پروژه"
+    assert "@user_270" in recent_all[-1].sender
 
 
 @pytest.mark.asyncio
@@ -791,7 +798,62 @@ async def test_feedback_buttons_disappear_on_click_and_notify_admin(tmp_path: Pa
         feedback_path=fb_file,
         admin_config_path=admin_file,
     )
+    assert len(reloaded.get_recent_chat_messages(-1001, limit=200)) >= 0
     stats = reloaded.get_feedback_stats()
     assert stats["up"] == 1
     assert stats["down"] == 1
     assert stats["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_chat_interaction_receives_at_least_200_messages_and_matches_named_members(tmp_path: Path):
+    captured = []
+
+    class DummySummarizer:
+        async def chat(
+            self,
+            chat_history: str,
+            session_turns: list[tuple[str, str]],
+            question: str,
+            asker_name: str,
+            mode: str = "chat",
+            language: str = "fa",
+        ) -> SummaryResult:
+            captured.append((chat_history, question, mode))
+            return SummaryResult(summary="**سحر** گفت ساعت ۶ آماده باشیم.", language="fa", provider="gemini")
+
+    class DummyMsg:
+        def __init__(self, text: str):
+            self.chat = SimpleNamespace(id=-100777, type="supergroup", title="گروه دوستان")
+            self.text = text
+            self.caption = None
+            self.from_user = SimpleNamespace(id=7, full_name="مهدیار", first_name="مهدیار", is_bot=False)
+
+        async def reply(self, text: str, reply_markup=None):
+            return SimpleNamespace()
+
+    cache = TranscriptCache(persistence_path=tmp_path / "hist.json")
+    cache.add_chat_message(-100777, "سحر (@sahar)", "بچه‌ها ساعت ۶ کافه قرار بذاریم")
+    for i in range(210):
+        cache.add_chat_message(-100777, f"مهدی_{i % 3}", f"پیام تستی شماره {i}")
+
+    await handle_chat_interaction(
+        DummyMsg("@vaez_summary_bot سحر چی گفته؟"),
+        DummySummarizer(),
+        cache,
+        bot_username="vaez_summary_bot",
+    )
+    history_passed, q_passed, mode_passed = captured[-1]
+    assert "سحر (@sahar)" in history_passed
+    assert "پیام تستی شماره 209" in history_passed
+    assert history_passed.count("\n") + 1 == 211  # > 200 messages passed to Q&A!
+    assert q_passed == "سحر چی گفته؟"
+    assert mode_passed == "chat"
+
+    await handle_chat_interaction(
+        DummyMsg("@vaez_summary_bot تیپ شخصیت مهدی طبق این چتا چیه؟"),
+        DummySummarizer(),
+        cache,
+        bot_username="vaez_summary_bot",
+    )
+    assert captured[-1][2] == "personality"

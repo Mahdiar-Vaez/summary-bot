@@ -59,6 +59,18 @@ def _extract_speaker_from_message(msg: Any) -> str:
 extract_speaker_name = _extract_speaker_from_message
 
 
+def extract_chat_sender_label(msg: Any) -> str:
+    """Return sender display name with optional @username for unambiguous per-member chat Q&A."""
+    name = _extract_speaker_from_message(msg)
+    from_user = getattr(msg, "from_user", None)
+    username = getattr(from_user, "username", None) if from_user is not None else None
+    if username:
+        clean_handle = str(username).lstrip("@").strip()
+        if clean_handle and clean_handle.lower() not in name.lower():
+            return f"{name} (@{clean_handle})"
+    return name
+
+
 def extract_voice_target(message: Any) -> tuple[Any, str] | None:
     """Return (media_obj, speaker_name) from message or its reply_to_message, or None."""
     replied = getattr(message, "reply_to_message", None)

@@ -25,7 +25,11 @@ from src.bot.cache import (
     TranscriptCache,
     chunk_text,
 )
-from src.bot.extractors import extract_speaker_name, extract_voice_target
+from src.bot.extractors import (
+    extract_chat_sender_label,
+    extract_speaker_name,
+    extract_voice_target,
+)
 from src.bot.formatting import format_telegram_html
 from src.bot.keyboards import (
     build_chat_summary_reply_keyboard,
@@ -72,6 +76,7 @@ _COMMAND_PREFIXES = (
     "/summary_50",
     "/summary_100",
     "/summary_150",
+    "/summary_200",
     "/ask",
     "/vibe",
     "/personality",
@@ -105,7 +110,7 @@ _PERSIAN_DIGIT_MAP = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "
 
 
 def _extract_requested_count(raw_text: str) -> int | None:
-    """Extract an optional message count (clamped to 1..150) from command or text."""
+    """Extract an optional message count (clamped to `MAX_CHAT_SUMMARY_MESSAGES`) from command or text."""
     normalized = (raw_text or "").translate(_PERSIAN_DIGIT_MAP)
     cmd_match = re.search(r"/summary_(\d{1,4})\b", normalized)
     if cmd_match:
@@ -282,6 +287,25 @@ def should_trigger_chat_interaction(
     )
 
 
+def _is_explicit_chat_summary_phrase(raw_text: str) -> bool:
+    """Return True only when user explicitly asks for the group/channel recap (not a person Q&A)."""
+    lowered = " ".join((raw_text or "").strip().lower().split())
+    if not lowered or "?" in lowered or "؟" in lowered:
+        return False
+    return lowered in {
+        "خلاصه چت",
+        "خلاصه گروه",
+        "خلاصه چنل",
+        "خلاصه کانال",
+        "خلاصه پیام",
+        "خلاصه پیام ها",
+        "خلاصه پیام‌ها",
+        "خلاصه پیامهای گروه",
+        "خلاصه پیام‌های گروه",
+        "خلاصه گفتگو",
+    }
+
+
 def _should_record_text(text: str) -> bool:
     if not text or text.startswith("/") or _is_bottom_keyboard_selection(text):
         return False
@@ -293,7 +317,7 @@ def _should_record_text(text: str) -> bool:
 
 
 def record_incoming_chat_message(message: Any, cache: TranscriptCache) -> None:
-    """Record non-command text/caption messages strictly in that chat's isolated 150-msg store."""
+    """Record non-command text/caption messages strictly in that chat's isolated rolling store."""
     sender_user = getattr(message, "from_user", None)
     if getattr(sender_user, "is_bot", False):
         return
@@ -313,7 +337,7 @@ def record_incoming_chat_message(message: Any, cache: TranscriptCache) -> None:
             if _should_record_text(replied_text):
                 cache.add_chat_message(
                     chat_id=chat_id,
-                    sender=extract_speaker_name(replied),
+                    sender=extract_chat_sender_label(replied),
                     text=replied_text,
                 )
 
@@ -321,7 +345,7 @@ def record_incoming_chat_message(message: Any, cache: TranscriptCache) -> None:
     if not _should_record_text(text):
         return
 
-    speaker = extract_speaker_name(message)
+    speaker = extract_chat_sender_label(message)
     cache.add_chat_message(chat_id=chat_id, sender=speaker, text=text)
 
 
@@ -505,14 +529,14 @@ async def _run_chat_history_summary(
     cache: TranscriptCache,
     origin_message: Any = None,
 ) -> None:
-    """Summarize the last `requested_count` (up to 150) messages for `chat_id` (no TTS, with feedback)."""
+    """Summarize the last `requested_count` messages for `chat_id` (no TTS, with feedback)."""
     clamped_count = max(1, min(int(requested_count), MAX_CHAT_SUMMARY_MESSAGES))
     entries = cache.get_recent_chat_messages(chat_id, limit=clamped_count)
     if not entries:
         empty_msg = (
             "📭 هنوز پیامی از این گفتگو در حافظه ربات ثبت نشده است.\n\n"
             "💡 **چرا پیام‌های قبلی دیده نشد؟**\n"
-            "۱. تلگرام به ربات‌ها اجازه دانلود پیام‌های قبل از عضویت را نمی‌دهد و ربات از این لحظه به بعد پیام‌ها را (تا ۱۵۰ پیام) ذخیره می‌کند.\n"
+            f"۱. تلگرام به ربات‌ها اجازه دانلود پیام‌های قبل از عضویت را نمی‌دهد و ربات از این لحظه به بعد پیام‌ها را (تا **{MAX_CHAT_SUMMARY_MESSAGES} پیام**) ذخیره می‌کند.\n"
             "۲. برای اینکه ربات در گروه پیام‌های عادی بچه‌ها را ببیند، حتماً باید در گروه **Admin (ادمین)** باشد (یا در `@BotFather` گزینه `Group Privacy` روی `Turn off` گذاشته شود)."
         )
         await _delete_and_send_output(
@@ -563,6 +587,7 @@ async def handle_chat_interaction(
     cache: TranscriptCache,
     bot_username: str | None = None,
     mode: str = "chat",
+    reply_context: str | None = None,
 ) -> None:
     """Answer fun questions, analyze member personalities, or chat using ONLY `chat_id`'s isolated session."""
     chat = getattr(message, "chat", None)
@@ -575,16 +600,22 @@ async def handle_chat_interaction(
     elif not question:
         await message.reply(
             format_telegram_html(
-                "😎 پایه‌ام! هر سوالی درباره **بچه‌های همین گفتگو**، **شخصیت بقیه** یا **خلاصه اتفاقات چت** داری بپرس یا همین الان باهام گپ بزن!"
+                "😎 پایه‌ام! درباره صحبت‌های بچه‌های همین چت هر سوالی داری بپرس:\n\n"
+                "• مثلاً: `@vaez_summary_bot سحر چی گفته؟`\n"
+                "• یا: `@vaez_summary_bot تیپ شخصیت مهدی طبق این چتا چیه؟`\n"
+                "• یا با `/vibe` شخصیت بچه‌های گروه رو تحلیل کن!"
             )
         )
         return
 
+    effective_question = (
+        f"(در پاسخ به پیام «{reply_context}»)\n{question}" if reply_context else question
+    )
     detected_mode = mode
     if detected_mode == "chat" and any(kw in question.lower() for kw in _PERSONALITY_KEYWORDS):
         detected_mode = "personality"
 
-    asker_name = extract_speaker_name(message)
+    asker_name = extract_chat_sender_label(message)
     recent_messages = cache.get_recent_chat_messages(chat_id, limit=MAX_CHAT_SUMMARY_MESSAGES)
     chat_history = "\n".join(f"[{m.sender}]: {m.text}" for m in recent_messages)
     session_turns = cache.get_chat_session_turns(chat_id)
@@ -593,7 +624,7 @@ async def handle_chat_interaction(
         result = await summarizer_manager.chat(
             chat_history=chat_history,
             session_turns=session_turns,
-            question=question,
+            question=effective_question,
             asker_name=asker_name,
             mode=detected_mode,
             language="fa",
@@ -939,10 +970,11 @@ def create_bot_router(
             "✨ **قابلیت‌های من:**\n"
             "۱. 🎙️ **خلاصه‌سازی ویس در چت خصوصی:** هر ویس یا فایل صوتی را مستقیم برایم بفرست.\n"
             "۲. 👥 **خلاصه‌سازی ویس در گروه‌ها:** روی هر ویسی ریپلای بزن و بنویس `خلاصه` (یا `/summary` یا `@vaez_summary_bot`).\n"
-            "۳. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (۱۰ تا ۱۵۰ پیام آخر):** با `/chat_summary` تعداد پیام را انتخاب کن.\n"
-            "۴. 😎 **چت تعاملی و تحلیل شخصیت بقیه (سشن جداگانه برای هر چت):**\n"
-            "   • با دستور `/vibe` شخصیت و وایب بچه‌های همین چت را بامزه تحلیل می‌کنم!\n"
-            "   • در پیوی مستقیم باهام چت کن یا در گروه با `@vaez_summary_bot سوالت` و یا ریپلای روی پیام‌های من درباره گروه سوال بپرس!\n"
+            "۳. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (۱۰ تا ۲۰۰ پیام آخر):** با `/chat_summary` تعداد پیام را انتخاب کن.\n"
+            f"۴. 😎 **چت و سوال درباره پیام‌های گروه (تا {MAX_CHAT_SUMMARY_MESSAGES} پیام اخیر، با سشن جدا برای هر چت):**\n"
+            "   • می‌تونی درباره صحبت‌های بچه‌ها بپرسی (مثلاً: `@vaez_summary_bot سحر چی گفته؟`)\n"
+            "   • یا شخصیت‌شناسی بگیری (مثلاً: `@vaez_summary_bot تیپ شخصیت مهدی طبق این چتا چیه؟` یا `/vibe`)\n"
+            "   • کافیه در گروه `@vaez_summary_bot` رو منشن کنی، روی پیام ربات ریپلای بزنی، یا از `/ask` استفاده کنی.\n"
             "۵. 🔊 **خلاصه صوتی ویس‌ها** + **دکمه‌های بازخورد** زیر هر خروجی."
         )
         await message.reply(format_telegram_html(welcome))
@@ -1033,6 +1065,7 @@ def create_bot_router(
             "summary_50",
             "summary_100",
             "summary_150",
+            "summary_200",
         )
     )
     async def cmd_chat_summary(message: Message) -> None:
@@ -1140,11 +1173,21 @@ def create_bot_router(
             bot_first_name=bot_identity["first_name"],
         ):
             record_incoming_chat_message(replied_msg, cache)
+            replied_sender_label = extract_chat_sender_label(replied_msg)
+            replied_body = (
+                getattr(replied_msg, "text", None) or getattr(replied_msg, "caption", None) or ""
+            ).strip()
+            reply_ctx = (
+                f"{replied_sender_label}: {replied_body[:200]}"
+                if replied_body
+                else None
+            )
             await handle_chat_interaction(
                 message=message,
                 summarizer_manager=summarizer_manager,
                 cache=cache,
                 bot_username=bot_identity["username"],
+                reply_context=reply_ctx,
             )
             return
 
@@ -1165,11 +1208,7 @@ def create_bot_router(
     @router.message()
     async def on_any_chat_message(message: Message) -> None:
         text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
-        lowered = text.lower()
-        if _is_bottom_keyboard_selection(text) or any(
-            phrase in lowered
-            for phrase in ("خلاصه پیام", "خلاصه چت", "خلاصه گروه", "خلاصه چنل", "خلاصه کانال")
-        ):
+        if _is_bottom_keyboard_selection(text) or _is_explicit_chat_summary_phrase(text):
             await handle_chat_summary_command(
                 message=message,
                 summarizer_manager=summarizer_manager,
