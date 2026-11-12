@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -17,6 +18,8 @@ logger = logging.getLogger(__name__)
 MAX_CHAT_HISTORY_PER_CHAT = 250
 MAX_SESSION_TURNS_PER_CHAT = 20
 MAX_PERSISTED_FEEDBACKS = 500
+CHAT_RATE_LIMIT_MAX_REQUESTS = 5
+CHAT_RATE_LIMIT_WINDOW_SECONDS = 300
 
 
 @dataclass(slots=True)
@@ -28,6 +31,7 @@ class TranscriptEntry:
     summary: str
     language: str
     created_at: float
+    chat_id: str | None = None
     tts_used: bool = False
     transcript_used: bool = False
     fb_id: str | None = None
@@ -74,10 +78,14 @@ class TranscriptCache:
         admin_config_path: Path | str | None = None,
         admin_chat_id: int | None = None,
         users_stats_path: Path | str | None = None,
+        rate_limit_max_requests: int = CHAT_RATE_LIMIT_MAX_REQUESTS,
+        rate_limit_window_seconds: int = CHAT_RATE_LIMIT_WINDOW_SECONDS,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self.max_items = max_items
         self.max_messages_per_chat = max_messages_per_chat
+        self.rate_limit_max_requests = max(1, int(rate_limit_max_requests))
+        self.rate_limit_window_seconds = max(1, int(rate_limit_window_seconds))
         self.persistence_path = Path(persistence_path) if persistence_path else None
         self.feedback_path = Path(feedback_path) if feedback_path else None
         self.admin_config_path = Path(admin_config_path) if admin_config_path else None
@@ -89,6 +97,7 @@ class TranscriptCache:
         self._completed_voices: OrderedDict[str, float] = OrderedDict()
         self._chat_history: OrderedDict[str, deque[ChatMessageEntry]] = OrderedDict()
         self._chat_sessions: OrderedDict[str, deque[tuple[str, str, str]]] = OrderedDict()
+        self._chat_rate_windows: dict[str, deque[float]] = {}
         self._prompt_message_ids: dict[str, int] = {}
         self._feedbacks: OrderedDict[str, FeedbackEntry] = OrderedDict()
         self._users_stats: dict[str, dict[str, Any]] = {}
@@ -500,6 +509,28 @@ class TranscriptCache:
         """Clear ONLY `chat_id`'s interactive Q&A session turns."""
         self._chat_sessions.pop(str(chat_id), None)
 
+    def check_and_consume_chat_rate_limit(
+        self, chat_id: int | str, *, now: float | None = None
+    ) -> tuple[bool, int]:
+        """Enforce a per-chat sliding window rate limit (default 5 requests / 300s).
+
+        Returns `(allowed, retry_after_seconds)`.
+        """
+        current = time.monotonic() if now is None else float(now)
+        key = str(chat_id)
+        window = self._chat_rate_windows.setdefault(key, deque())
+        cutoff = current - self.rate_limit_window_seconds
+
+        while window and window[0] <= cutoff:
+            window.popleft()
+
+        if len(window) >= self.rate_limit_max_requests:
+            retry_after = max(1, math.ceil(self.rate_limit_window_seconds - (current - window[0])))
+            return False, retry_after
+
+        window.append(current)
+        return True, 0
+
     def try_acquire_voice(self, voice_key: str) -> bool:
         """Return True and lock voice_key if not currently in-flight or already summarized."""
         if not voice_key:
@@ -531,6 +562,7 @@ class TranscriptCache:
         text: str,
         summary: str = "",
         language: str = "fa",
+        chat_id: int | str | None = None,
     ) -> str:
         """Store transcript and summary and return a compact 12-char cache ID."""
         self._evict_expired()
@@ -544,6 +576,7 @@ class TranscriptCache:
             summary=summary or text,
             language=language,
             created_at=time.monotonic(),
+            chat_id=str(chat_id) if chat_id is not None else None,
         )
         return cache_id
 

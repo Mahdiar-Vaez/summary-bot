@@ -108,6 +108,8 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
         admin_config_path="data/admin_config.json",
         admin_chat_id=settings.admin_chat_id,
         users_stats_path="data/users_stats.json",
+        rate_limit_max_requests=settings.chat_rate_limit_max_requests,
+        rate_limit_window_seconds=settings.chat_rate_limit_window_seconds,
     )
     dp = Dispatcher()
     dp.include_router(

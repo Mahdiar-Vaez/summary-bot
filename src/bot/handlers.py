@@ -39,7 +39,10 @@ from src.bot.keyboards import (
 from src.exceptions import FileTooLargeError, ProviderChainExhaustedError
 from src.services.stt.manager import STTManager
 from src.services.summarizer.manager import SummarizerManager
-from src.services.summarizer.prompts import CHAT_HISTORY_SPEAKER_PREFIX
+from src.services.summarizer.prompts import (
+    CHAT_HISTORY_SPEAKER_PREFIX,
+    sanitize_sensitive_text,
+)
 from src.services.tts.manager import TTSManager
 
 logger = logging.getLogger(__name__)
@@ -384,6 +387,54 @@ def _build_voice_summary_markup(
     )
 
 
+_TOKEN_EXHAUSTED_MESSAGE = (
+    "😅 فعلاً توکنام تموم شده! به ادمینم بگین توکن رایگان بریزه 🙏"
+)
+_QUOTA_ERROR_MARKERS = (
+    "429",
+    "402",
+    "quota",
+    "resource_exhausted",
+    "rate",
+    "limit",
+    "token",
+    "credit",
+    "insufficient",
+    "exhausted",
+    "too many requests",
+)
+
+
+def _is_token_or_quota_error(exc: Exception) -> bool:
+    """Return True when all providers failed due to token/quota/rate-limit exhaustion."""
+    if isinstance(exc, ProviderChainExhaustedError):
+        joined = " | ".join(exc.errors).lower()
+        return bool(exc.errors) and any(m in joined for m in _QUOTA_ERROR_MARKERS)
+    return any(m in str(exc).lower() for m in _QUOTA_ERROR_MARKERS)
+
+
+def _format_wait_duration(seconds: int) -> str:
+    mins, secs = divmod(max(1, int(seconds)), 60)
+    if mins and secs:
+        return f"{mins} دقیقه و {secs} ثانیه"
+    if mins:
+        return f"{mins} دقیقه"
+    return f"{secs} ثانیه"
+
+
+def _enforce_chat_rate_limit(chat_id: int | str, cache: TranscriptCache) -> str | None:
+    """Return None if `chat_id` is within rate limit, else a friendly Persian wait notice."""
+    allowed, retry_after = cache.check_and_consume_chat_rate_limit(chat_id)
+    if allowed:
+        return None
+    wait_str = _format_wait_duration(retry_after)
+    return (
+        f"⏳ سقف استفاده این چت ({cache.rate_limit_max_requests} پیام در هر "
+        f"{max(1, cache.rate_limit_window_seconds // 60)} دقیقه) پر شده!\n"
+        f"لطفاً حدود **{wait_str}** دیگه دوباره پیام بدید 🙏"
+    )
+
+
 async def process_voice_request(
     message: Any,
     bot: Any,
@@ -413,6 +464,15 @@ async def process_voice_request(
     if not cache.try_acquire_voice(voice_key):
         logger.info("Skipping duplicate/in-flight summary request for voice_key=%s", voice_key)
         return
+
+    chat_obj = getattr(message, "chat", None)
+    voice_chat_id = getattr(chat_obj, "id", None)
+    if voice_chat_id is not None:
+        rate_msg = _enforce_chat_rate_limit(voice_chat_id, cache)
+        if rate_msg is not None:
+            cache.release_voice(voice_key)
+            await message.reply(format_telegram_html(rate_msg))
+            return
 
     status_msg = await message.reply(f"⏳ در حال خلاصه‌سازی ویس «{html.escape(speaker_name, quote=False)}»...")
     tmp_path: Path | None = None
@@ -448,6 +508,7 @@ async def process_voice_request(
             text=stt_result.text,
             summary=summary_result.summary,
             language=summary_result.language,
+            chat_id=chat_id,
         )
         fb_id = cache.create_feedback_target(
             output_type="voice_summary",
@@ -484,9 +545,12 @@ async def process_voice_request(
     except ProviderChainExhaustedError as exc:
         cache.release_voice(voice_key)
         logger.error("All providers failed during voice processing: %s", exc)
-        await status_msg.edit_text(
-            "❌ خطا در پردازش ویس: تمامی سرویس‌های هوش مصنوعی در حال حاضر با محدودیت مواجه شدند. لطفاً چند لحظه دیگر دوباره تلاش کنید."
+        err_reply = (
+            _TOKEN_EXHAUSTED_MESSAGE
+            if _is_token_or_quota_error(exc)
+            else "❌ خطا در پردازش ویس: تمامی سرویس‌های هوش مصنوعی در حال حاضر با محدودیت مواجه شدند. لطفاً چند لحظه دیگر دوباره تلاش کنید."
         )
+        await status_msg.edit_text(err_reply)
     except Exception as exc:  # noqa: BLE001
         cache.release_voice(voice_key)
         logger.exception("Unexpected error processing voice message: %s", exc)
@@ -575,10 +639,15 @@ async def _run_chat_history_summary(
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to summarize chat history: %s", exc)
+        err_reply = (
+            _TOKEN_EXHAUSTED_MESSAGE
+            if _is_token_or_quota_error(exc)
+            else "❌ متأسفانه در خلاصه‌سازی پیام‌های گفتگو خطایی رخ داد. لطفاً چند لحظه دیگر دوباره تلاش کنید."
+        )
         await _delete_and_send_output(
             origin_message=origin_message,
             status_msg=status_updater,
-            text="❌ متأسفانه در خلاصه‌سازی پیام‌های گفتگو خطایی رخ داد. لطفاً چند لحظه دیگر دوباره تلاش کنید.",
+            text=err_reply,
             reply_markup=None,
         )
 
@@ -613,6 +682,11 @@ async def handle_chat_interaction(
     effective_question = (
         f"(در پاسخ به پیام «{reply_context}»)\n{question}" if reply_context else question
     )
+    rate_msg = _enforce_chat_rate_limit(chat_id, cache)
+    if rate_msg is not None:
+        await message.reply(format_telegram_html(rate_msg))
+        return
+
     detected_mode = mode
     if detected_mode == "chat" and any(kw in question.lower() for kw in _PERSONALITY_KEYWORDS):
         detected_mode = "personality"
@@ -631,29 +705,33 @@ async def handle_chat_interaction(
             mode=detected_mode,
             language="fa",
         )
+        safe_reply = sanitize_sensitive_text(result.summary)
         cache.add_chat_turn(
             chat_id=chat_id,
             user_name=asker_name,
             question=question,
-            answer=result.summary,
+            answer=safe_reply,
         )
         fb_id = cache.create_feedback_target(
             output_type="chat_qa",
             chat_id=chat_id,
             chat_title=_get_chat_title(message),
-            preview=result.summary,
+            preview=safe_reply,
             language=result.language,
         )
         fb_keyboard = build_feedback_keyboard(fb_id, language=result.language)
         await message.reply(
-            format_telegram_html(result.summary),
+            format_telegram_html(safe_reply),
             reply_markup=fb_keyboard,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Chat interaction failed for chat_id=%s: %s", chat_id, exc)
-        await message.reply(
-            "❌ الان مغزم یکم شلوغ شد، چند لحظه دیگه دوباره سوالتو بپرس!"
+        err_reply = (
+            _TOKEN_EXHAUSTED_MESSAGE
+            if _is_token_or_quota_error(exc)
+            else "❌ الان مغزم یکم شلوغ شد، چند لحظه دیگه دوباره سوالتو بپرس!"
         )
+        await message.reply(err_reply)
 
 
 async def handle_chat_summary_command(
@@ -685,6 +763,11 @@ async def handle_chat_summary_command(
         except Exception as exc:  # noqa: BLE001
             logger.debug("Could not delete prompt message %s: %s", prev_prompt_id, exc)
 
+    rate_msg = _enforce_chat_rate_limit(chat_id, cache)
+    if rate_msg is not None:
+        await message.reply(format_telegram_html(rate_msg), reply_markup=ReplyKeyboardRemove())
+        return
+
     status_msg = await message.reply(
         f"⏳ در حال خلاصه‌سازی {min(count, MAX_CHAT_SUMMARY_MESSAGES)} پیام آخر...",
         reply_markup=ReplyKeyboardRemove(),
@@ -712,13 +795,20 @@ async def handle_chat_summary_callback(
     except ValueError:
         count = 50
 
-    await callback.answer(f"⏳ خلاصه‌سازی {count} پیام آخر...")
     msg = getattr(callback, "message", None)
     if msg is None:
+        await callback.answer()
         return
 
     chat = getattr(msg, "chat", None)
     chat_id = getattr(chat, "id", "private")
+    rate_msg = _enforce_chat_rate_limit(chat_id, cache)
+    if rate_msg is not None:
+        await callback.answer("⏳ سقف استفاده این چت موقتاً پر شده!", show_alert=True)
+        await msg.reply(format_telegram_html(rate_msg))
+        return
+
+    await callback.answer(f"⏳ خلاصه‌سازی {count} پیام آخر...")
     await _run_chat_history_summary(
         chat_id=chat_id,
         requested_count=count,
@@ -757,12 +847,17 @@ async def handle_transcript_callback(
         )
         return
 
+    msg = getattr(callback, "message", None)
+    msg_chat_id = getattr(getattr(msg, "chat", None), "id", None) if msg is not None else None
+    if entry.chat_id is not None and msg_chat_id is not None and entry.chat_id != str(msg_chat_id):
+        await callback.answer("⛔ این دکمه متعلق به چت دیگری است.", show_alert=True)
+        return
+
     if entry.transcript_used:
         await callback.answer("📜 متن کامل این ویس قبلاً ارسال شده است.", show_alert=False)
         return
 
     entry.transcript_used = True
-    msg = getattr(callback, "message", None)
     await _update_message_buttons(msg, cache, cache_id, entry)
     await callback.answer()
 
@@ -804,12 +899,17 @@ async def handle_tts_callback(
         )
         return
 
+    msg = getattr(callback, "message", None)
+    msg_chat_id = getattr(getattr(msg, "chat", None), "id", None) if msg is not None else None
+    if entry.chat_id is not None and msg_chat_id is not None and entry.chat_id != str(msg_chat_id):
+        await callback.answer("⛔ این دکمه متعلق به چت دیگری است.", show_alert=True)
+        return
+
     if entry.tts_used:
         await callback.answer("🔊 نسخه صوتی خلاصه قبلاً ارسال شده است.", show_alert=False)
         return
 
     entry.tts_used = True
-    msg = getattr(callback, "message", None)
     await _update_message_buttons(msg, cache, cache_id, entry)
     await callback.answer("🔊 در حال تولید فایل صوتی خلاصه...")
 
@@ -848,7 +948,12 @@ async def handle_tts_callback(
         entry.tts_used = False
         await _update_message_buttons(msg, cache, cache_id, entry)
         logger.error("Failed to generate TTS audio summary: %s", exc)
-        await msg.reply("❌ متأسفانه در تولید فایل صوتی خلاصه خطایی رخ داد.")
+        err_reply = (
+            _TOKEN_EXHAUSTED_MESSAGE
+            if _is_token_or_quota_error(exc)
+            else "❌ متأسفانه در تولید فایل صوتی خلاصه خطایی رخ داد."
+        )
+        await msg.reply(err_reply)
 
 
 def _format_admin_feedback_notification(entry: FeedbackEntry) -> str:

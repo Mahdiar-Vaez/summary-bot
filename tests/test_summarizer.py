@@ -168,7 +168,26 @@ async def test_build_chat_qa_prompt_and_manager_chat_with_fallback():
         mode="chat",
         language="fa",
     )
-    assert "سحر" in sys_lookup or "@username" in sys_lookup
+    # Verify creator identity, strict privacy protection, ultra-conciseness, and secret scrubbing
+    assert "مهدیار واعظ" in sys_lookup
+    assert "پارس‌پک" in sys_lookup
+
+    sys_secret, user_secret = build_chat_qa_prompt(
+        chat_history=(
+            "[مهدیار]: سرور از پارس پک گرفتم روی 185.10.20.30 و کلید AIzaSyDummyKeyValue123456789012345\n"
+            "[سحر]: بچه‌ها فردا ساعت ۶ جلسه داریم"
+        ),
+        session_turns=[],
+        question="چی می‌دونی؟",
+        asker_name="کاربر",
+        mode="chat",
+        language="fa",
+    )
+    assert "پارس پک" not in user_secret
+    assert "185.10.20.30" not in user_secret
+    assert "AIzaSyDummyKeyValue123456789012345" not in user_secret
+    assert "سحر" in user_secret
+    assert "کوتاه" in sys_secret or "خلاصه" in sys_secret
 
     def gemini_fail(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, text="rate limit")

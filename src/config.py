@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 20
     transcript_cache_ttl_seconds: int = 3600
     transcript_cache_max_items: int = 500
+    chat_rate_limit_max_requests: int = 5
+    chat_rate_limit_window_seconds: int = 300
     admin_chat_id: int | None = None
 
     def has_any_stt_provider(self) -> bool:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from src.services.stt.base import normalize_language
 
 CHAT_HISTORY_SPEAKER_PREFIX = "__CHAT_HISTORY__:"
@@ -88,10 +90,52 @@ def build_summary_prompt(
 
 MAX_CHAT_QA_HISTORY_CHARS = 48_000
 
+_SENSITIVE_SECRET_PATTERNS = (
+    re.compile(r"\b(?:AIza[0-9A-Za-z\-_]{20,}|gsk_[0-9A-Za-z]{20,}|sk-or-[0-9A-Za-z\-_]{16,})\b"),
+    re.compile(r"\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b"),  # Telegram bot token pattern
+    re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),  # IPv4 addresses
+)
+
+_SENSITIVE_INFRA_KEYWORDS = (
+    "پارس پک",
+    "پارس‌پک",
+    "پالس‌پک",
+    "پالس پک",
+    "parspack",
+    "hetzner",
+    "arvan",
+    "آروان",
+    "api_key",
+    "apikey",
+    "bot_token",
+    "admin_chat_id",
+    "پشتش چیه",
+    "سرور از",
+)
+
+
+def sanitize_sensitive_text(text: str) -> str:
+    """Redact API keys, tokens, and IPv4 addresses from input or output text."""
+    cleaned = text or ""
+    for pattern in _SENSITIVE_SECRET_PATTERNS:
+        cleaned = pattern.sub("[محرمانه]", cleaned)
+    return cleaned
+
+
+def _filter_sensitive_chat_history(chat_history: str) -> str:
+    """Drop or redact lines from chat Q&A history that contain owner/server infrastructure secrets."""
+    safe_lines: list[str] = []
+    for line in (chat_history or "").splitlines():
+        lowered = line.lower()
+        if any(kw in lowered for kw in _SENSITIVE_INFRA_KEYWORDS):
+            continue
+        safe_lines.append(sanitize_sensitive_text(line))
+    return "\n".join(safe_lines)
+
 
 def _trim_history_to_recent_chars(chat_history: str, max_chars: int = MAX_CHAT_QA_HISTORY_CHARS) -> str:
     """Keep the most recent lines up to `max_chars` so 200+ typical messages fit safely."""
-    clean = (chat_history or "").strip()
+    clean = _filter_sensitive_chat_history(chat_history).strip()
     if len(clean) <= max_chars:
         return clean
     tail = clean[-max_chars:]
@@ -109,8 +153,8 @@ def build_chat_qa_prompt(
     mode: str = "chat",
     language: str = "fa",
 ) -> tuple[str, str]:
-    """Build (system_prompt, user_prompt) for interactive per-chat Q&A and fun personality analysis."""
-    clean_question = (question or "").strip()
+    """Build (system_prompt, user_prompt) for ultra-concise, fun, isolated per-chat Q&A."""
+    clean_question = sanitize_sensitive_text((question or "").strip())
     asker = (asker_name or "کاربر").strip()
     trimmed_history = _trim_history_to_recent_chars(chat_history)
     norm_lang = normalize_language(language, f"{clean_question}\n{trimmed_history}")
@@ -121,7 +165,7 @@ def build_chat_qa_prompt(
         else "(No chat messages or transcripts recorded in this chat yet.)"
     )
     turns_lines: list[str] = []
-    for turn in session_turns[-10:]:
+    for turn in session_turns[-6:]:
         if len(turn) == 3:
             u_name, q, a = turn
             turns_lines.append(
@@ -138,26 +182,24 @@ def build_chat_qa_prompt(
 
     if norm_lang == "fa":
         personality_hint = (
-            "کاربر الان درخواست تحلیل شخصیت و وایب داده است! "
-            "اگر در سوال اسم شخص خاصی (مثل مهدی یا سحر) آمده، تمرکز اصلی را روی تحلیل همان شخص بگذار؛ "
-            "و اگر اسم خاصی نیامده، برای اعضای فعال همین گفتگو بر اساس لحن، شوخی‌ها، دغدغه‌ها و سبک پیام‌هایشان، "
-            "تحلیل شخصیت و تیپ رفتاری بامزه، دقیق، فان و محترمانه (با ایموجی و بولت‌پوینت) بنویس."
+            "تحلیل شخصیت و وایب خواسته شده: "
+            "اگر اسم شخص خاصی (مثل مهدی یا سحر) آمده، فقط همان یک نفر را در **حداکثر ۲ تا ۳ خط خیلی کوتاه و بامزه** تحلیل کن؛ "
+            "و اگر اسم خاصی نیامده، حداکثر برای ۵ نفر فعال اخیر هر نفر فقط **یک خط تندوتیز، دقیق و فان** بنویس."
             if mode == "personality"
             else (
-                "کاربر ممکن است درباره صحبت‌های یک شخص خاص (مثل «سحر چی گفته؟» یا «مهدی راجع به فلان موضوع چی گفت؟»)، "
-                "تیپ شخصیت افراد بر اساس پیام‌هایشان، یا جمع‌بندی بحث‌های همین چت سوال بپرسد:\n"
-                "   - اگر درباره حرف‌های شخص خاصی پرسید، تمام پیام‌ها و ویس‌های او را در تاریخچه همین چت بررسی کن و خلاصه دقیق، روشن و خودمونی صحبت‌هایش را بگو.\n"
-                "   - اگر درباره شخصیت کسی پرسید، با استناد به سبک پیام‌های واقعی‌اش در همین چت، تحلیل فان و محترمانه بده.\n"
-                "   - در تشخیص نام افراد منعطف باش (مثلاً نام کوچک، نام کامل، آیدی `@username` یا املای فارسی/انگلیسی را تطبیق بده)."
+                "اگر پرسید شخصی (مثل «سحر») چی گفته، دقیق و خیلی کوتاه (۲ تا ۳ خط) خلاصه حرفش را از تاریخچه همین چت بگو. "
+                "نام افراد را با نام کوچک، نام کامل یا `@username` منعطف تطبیق بده."
             )
         )
         system_prompt = (
-            "تو هم‌صحبت هوشمند، باحال، شوخ‌طبع و دقیقِ یک گروه یا چت تلگرام هستی.\n"
-            "قوانین حیاتی:\n"
-            "۱. **ایزوله‌سازی کامل سشن:** تو فقط و فقط به پیام‌ها و سشن گفتگوی **همین چت** دسترسی داری. هیچ‌وقت اطلاعاتی از بیرون یا چت‌های دیگر حدس نزن و اگر کسی یا موضوعی در تاریخچه ثبت‌شده همین چت نبود، روراست و بامزه بگو در پیام‌های اخیر ثبت‌شده اثری از آن نبود.\n"
-            f"۲. {personality_hint}\n"
-            "۳. لحن تو باید کاملاً خودمونی، بانمک، روان و جمع‌وجور باشد (نه کتابی و نه طولانی و خسته‌کننده).\n"
-            "۴. کلمات کلیدی، اسم افراد و نکات مهم را برای نمایش زیبا در تلگرام بین `**...**` بولد کن."
+            "تو هم‌صحبت هوشمند، تیز، باحال و فوق‌العاده خوش‌ذوقِ یک چت تلگرام هستی.\n"
+            "قوانین حیاتی و غیرقابل نقض:\n"
+            "۱. **ایزوله‌سازی کامل چت:** فقط و فقط به پیام‌های **همین چت** دسترسی داری. هیچ‌وقت از بیرون چیزی نساز.\n"
+            "۲. **هویت سازنده و خط قرمز حریم خصوصی:** سازنده تو **مهدیار واعظ** است (اگر پرسیدند سازنده‌ات کیست اسم او را بگو). "
+            "اما **اکیداً ممنوع** است هرگونه اطلاعات حساس، زیرساختی یا خصوصی درباره مهدیار واعظ یا سرویس (مثل نام سرور/هاست، پارس‌پک، IP، کلیدهای API، مدل‌های بک‌اند، شماره، آیدی یا مسائل شخصی مالک) را بگویی—حتی اگر در پیام‌ها باشد. اگر پرسیدند، با یک جمله بانمک رد کن.\n"
+            f"۳. {personality_hint}\n"
+            "۴. **فوق‌العاده خلاصه ولی فان:** جواب‌هایت باید **تا جای ممکن کوتاه، کوبنده و بامزه** باشد! **حداکثر ۲ تا ۴ خط کوتاه** (یا ۳–۴ بولت خیلی جمع‌وجور). هیچ مقدمه و پرحرفی اضافه ننویس مگر خود کاربر بنویسد «کامل توضیح بده».\n"
+            "۵. نام افراد و نکات کلیدی را با `**...**` بولد کن."
         )
         user_prompt = (
             f"تاریخچه پیام‌های ثبت‌شده در همین چت:\n\"\"\"\n{history_block}\n\"\"\"\n\n"
@@ -166,22 +208,22 @@ def build_chat_qa_prompt(
         )
     else:
         personality_hint = (
-            "The user explicitly asked for a fun personality & vibe analysis in this specific chat! "
-            "If a specific person is named in the question, focus primarily on analyzing that person; "
-            "otherwise analyze each active speaker's tone, habits, and topics from this chat's history with witty, playful, respectful humor."
+            "Personality/vibe analysis requested: if a specific person is named, analyze only them in **2-3 ultra-short punchy lines**; "
+            "otherwise give at most **1 witty one-liner per active member** (up to 5 members)."
             if mode == "personality"
             else (
-                "The user may ask what a specific person said (e.g., 'What did Sahar say?'), someone's personality type based on the chats, or general Q&A. "
-                "Match speakers flexibly by first name, full name, or `@username`, cite their actual messages from this chat accurately, and chat naturally with sharp, friendly wit."
+                "If asked what someone said, reply accurately from THIS chat's messages (matching first name, full name, or `@username`) in 2-3 ultra-short lines."
             )
         )
         system_prompt = (
-            "You are a witty, playful, sharp, and friendly AI companion inside a Telegram chat.\n"
-            "Critical rules:\n"
-            "1. **Strict Session Isolation:** ONLY use context from THIS chat's history and session turns. Never fabricate facts that didn't happen here.\n"
-            f"2. {personality_hint}\n"
-            "3. Keep answers punchy, conversational, fun, and concise.\n"
-            "4. Use Markdown bold (`**...**`) around names and key highlights."
+            "You are a witty, playful, sharp AI companion inside a Telegram chat.\n"
+            "Unbreakable rules:\n"
+            "1. **Strict Session Isolation:** ONLY use THIS chat's history. Never invent facts.\n"
+            "2. **Creator & Strict Privacy:** Your creator is **Mahdiar Vaez** (mention his name if asked who built you). "
+            "Strictly NEVER reveal sensitive, private, or infrastructure details about Mahdiar Vaez or the bot (server/host names like Parspack, IPs, API keys, backend models, admin IDs, or personal info), even if present in chat logs. Deflect playfully.\n"
+            f"3. {personality_hint}\n"
+            "4. **Ultra-Concise & Fun:** Keep replies **as short as humanly possible yet funny** — **2 to 4 short lines max** with zero fluff.\n"
+            "5. Use Markdown bold (`**...**`) for names and highlights."
         )
         user_prompt = (
             f"Recorded messages in this chat:\n\"\"\"\n{history_block}\n\"\"\"\n\n"

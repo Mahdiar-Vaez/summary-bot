@@ -35,12 +35,13 @@ class GroqSummarizerProvider:
         user_prompt: str,
         norm_lang: str,
         temperature: float = 0.3,
+        max_tokens: int | None = None,
     ) -> SummaryResult:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
+        payload: dict[str, object] = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -48,6 +49,8 @@ class GroqSummarizerProvider:
             ],
             "temperature": temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         try:
             if self._client is not None:
@@ -109,4 +112,10 @@ class GroqSummarizerProvider:
             mode=mode,
             language=norm_lang,
         )
-        return await self._generate(system_prompt, user_prompt, norm_lang, temperature=0.7)
+        return await self._generate(
+            system_prompt,
+            user_prompt,
+            norm_lang,
+            temperature=0.7,
+            max_tokens=450,
+        )

@@ -33,15 +33,19 @@ class GeminiSummarizerProvider:
         user_prompt: str,
         norm_lang: str,
         temperature: float = 0.3,
+        max_output_tokens: int | None = None,
     ) -> SummaryResult:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
             f"{self.model}:generateContent?key={self.api_key}"
         )
+        gen_cfg: dict[str, object] = {"temperature": temperature}
+        if max_output_tokens is not None:
+            gen_cfg["maxOutputTokens"] = max_output_tokens
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-            "generationConfig": {"temperature": temperature},
+            "generationConfig": gen_cfg,
         }
 
         try:
@@ -99,4 +103,10 @@ class GeminiSummarizerProvider:
             mode=mode,
             language=norm_lang,
         )
-        return await self._generate(system_prompt, user_prompt, norm_lang, temperature=0.7)
+        return await self._generate(
+            system_prompt,
+            user_prompt,
+            norm_lang,
+            temperature=0.7,
+            max_output_tokens=450,
+        )

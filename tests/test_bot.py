@@ -204,7 +204,7 @@ async def test_process_voice_request_cleans_up_temp_file_on_provider_failure():
 
     assert len(recorded_paths) == 1
     assert not recorded_paths[0].exists()
-    assert "خطا" in status_edits[-1][0]
+    assert "توکنام تموم شده" in status_edits[-1][0]
 
 
 @pytest.mark.asyncio
@@ -961,3 +961,87 @@ async def test_active_users_stats_tracking_and_admin_only_command(tmp_path: Path
     assert "کاربران فعال" in replies[-1]
     assert "5190248080" in replies[-1]
     assert "سارا" in replies[-1] or "مهدیار" in replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_per_chat_rate_limiter_5_per_5_minutes_and_token_exhaustion_message(tmp_path: Path):
+    cache = TranscriptCache(
+        persistence_path=tmp_path / "hist.json",
+        rate_limit_max_requests=5,
+        rate_limit_window_seconds=300,
+    )
+
+    # 1. Exact sliding window unit test: 5 allowed in chat A, 6th blocked, chat B untouched
+    t0 = 1000.0
+    for i in range(5):
+        allowed, wait = cache.check_and_consume_chat_rate_limit(-1001, now=t0 + i)
+        assert allowed is True
+        assert wait == 0
+
+    blocked, wait_sec = cache.check_and_consume_chat_rate_limit(-1001, now=t0 + 10)
+    assert blocked is False
+    assert wait_sec >= 289
+
+    # Different chat is completely independent
+    allowed_b, _ = cache.check_and_consume_chat_rate_limit(-1002, now=t0 + 10)
+    assert allowed_b is True
+
+    # After 5 minutes (300s) passes, chat A unlocks again
+    allowed_after, _ = cache.check_and_consume_chat_rate_limit(-1001, now=t0 + 301)
+    assert allowed_after is True
+
+    # 2. Handler integration: 6th message blocked cleanly without calling LLM
+    sent = []
+    llm_calls = 0
+
+    class DummySummarizer:
+        async def chat(self, **kwargs):
+            nonlocal llm_calls
+            llm_calls += 1
+            return SummaryResult(summary="پاسخ کوتاه و فان!", language="fa", provider="gemini")
+
+    class DummyMsg:
+        def __init__(self, chat_id: int, text: str):
+            self.chat = SimpleNamespace(id=chat_id, type="supergroup", title="گروه تست")
+            self.text = text
+            self.caption = None
+            self.from_user = SimpleNamespace(id=123, full_name="علی", username="ali", is_bot=False)
+
+        async def reply(self, text: str, reply_markup=None):
+            sent.append(text)
+            return SimpleNamespace()
+
+    chat_c = -100333
+    for i in range(5):
+        await handle_chat_interaction(
+            DummyMsg(chat_c, f"@vaez_summary_bot سوال {i}"),
+            DummySummarizer(),
+            cache,
+            bot_username="vaez_summary_bot",
+        )
+    assert llm_calls == 5
+
+    # 6th call must be rejected by rate limiter (LLM not called)
+    await handle_chat_interaction(
+        DummyMsg(chat_c, "@vaez_summary_bot سوال ششم"),
+        DummySummarizer(),
+        cache,
+        bot_username="vaez_summary_bot",
+    )
+    assert llm_calls == 5
+    assert "5 پیام در هر 5 دقیقه" in sent[-1]
+
+    # 3. Token/quota exhausted error sends the requested Persian admin-refill message
+    class QuotaFailSummarizer:
+        async def chat(self, **kwargs):
+            raise ProviderChainExhaustedError(["gemini: HTTP 429 RESOURCE_EXHAUSTED quota exceeded"])
+
+    await handle_chat_interaction(
+        DummyMsg(-100444, "@vaez_summary_bot سحر چی گفته؟"),
+        QuotaFailSummarizer(),
+        cache,
+        bot_username="vaez_summary_bot",
+    )
+    assert "فعلاً توکنام تموم شده" in sent[-1]
+    assert "ادمینم" in sent[-1]
+    assert "توکن رایگان" in sent[-1]
