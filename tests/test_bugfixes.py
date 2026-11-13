@@ -1072,3 +1072,207 @@ async def test_ask_works_in_channel_relaxed_syntax_reply_and_anonymous_admin(tmp
         reply_to_message=None,
     )
     assert should_trigger_chat_interaction(anon_msg, bot_id=9048492533, bot_username="vaez_summary_bot") is True
+
+
+@pytest.mark.asyncio
+async def test_vibe_dropdown_shows_username_picker_and_trailing_slash_commands(tmp_path: Path):
+    """Bare /vibe from command dropdown shows an interactive @username picker instead of analyzing everyone immediately."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from aiogram import Bot, Dispatcher
+    from aiogram.client.session.base import BaseSession
+    from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
+    from aiogram.types import CallbackQuery, Chat, Message, Update, User
+    from src.bot.cache import TranscriptCache
+    from src.bot.handlers import create_bot_router
+    from src.services.summarizer.base import SummaryResult
+
+    sent_payloads: list[dict] = []
+    callback_answers: list[dict] = []
+
+    class RecordingSession(BaseSession):
+        async def make_request(self, bot, method, timeout=None):
+            if isinstance(method, SendMessage):
+                sent_payloads.append(
+                    {
+                        "chat_id": method.chat_id,
+                        "text": method.text,
+                        "reply_markup": method.reply_markup,
+                    }
+                )
+                return Message(
+                    message_id=900 + len(sent_payloads),
+                    date=datetime.now(timezone.utc),
+                    chat=Chat(id=int(method.chat_id), type="supergroup"),
+                    text=method.text,
+                )
+            if isinstance(method, EditMessageText):
+                sent_payloads.append(
+                    {
+                        "chat_id": method.chat_id,
+                        "text": method.text,
+                        "reply_markup": method.reply_markup,
+                        "edited": True,
+                    }
+                )
+                return True
+            if isinstance(method, AnswerCallbackQuery):
+                callback_answers.append({"text": method.text, "show_alert": method.show_alert})
+                return True
+            return True
+
+        async def stream_content(self, url, timeout=None, chunk_size=65536, raise_for_status=True):
+            if False:
+                yield b""
+
+        async def close(self):
+            return None
+
+    fake_bot = Bot(token="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", session=RecordingSession())
+    fake_bot._me = User(id=9048492533, is_bot=True, first_name="voice-summary", username="vaez_summary_bot")
+
+    llm_calls: list[dict] = []
+
+    class DummySummarizer:
+        async def summarize(self, *args, **kwargs):
+            return SummaryResult(summary="ok", language="fa", provider="dummy")
+
+        async def chat(self, chat_history, session_turns, question, asker_name, mode="chat", language="fa"):
+            llm_calls.append(
+                {
+                    "history": chat_history,
+                    "question": question,
+                    "mode": mode,
+                }
+            )
+            return SummaryResult(summary="پاسخ وایب و تست", language="fa", provider="dummy")
+
+    cache = TranscriptCache(
+        persistence_path=tmp_path / "chat.json",
+        rate_limit_max_requests=5,
+        rate_limit_window_seconds=300,
+    )
+    chat_id = -100444
+    cache.add_chat_message(chat_id, "مهدیار (@vaezCore)", "بچه‌ها سرور رو آپدیت کردم")
+    cache.add_chat_message(chat_id, "سحر (@sahar_dev)", "عالیه مرسی")
+    cache.add_chat_message(chat_id, "علی", "منم الان تست می‌کنم")
+
+    router = create_bot_router(
+        stt_manager=SimpleNamespace(),
+        summarizer_manager=DummySummarizer(),
+        cache=cache,
+    )
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    group_chat = Chat(id=chat_id, type="supergroup", title="گروه تست")
+    human_user = User(id=101, is_bot=False, first_name="مهدیار", username="vaezCore")
+
+    # 1. Tapping /vibe from dropdown menu (no args) -> NO LLM call, shows inline buttons with @username
+    vibe_upd = Update(
+        update_id=1,
+        message=Message(
+            message_id=1,
+            date=datetime.now(timezone.utc),
+            chat=group_chat,
+            from_user=human_user,
+            text="/vibe",
+        ),
+    )
+    await dp.feed_update(fake_bot, vibe_upd)
+    assert len(llm_calls) == 0
+    assert len(sent_payloads) == 1
+    markup = sent_payloads[0]["reply_markup"]
+    assert markup is not None
+    buttons = [btn for row in markup.inline_keyboard for btn in row]
+    assert any("@vaezCore" in btn.text for btn in buttons)
+    assert any("@sahar_dev" in btn.text for btn in buttons)
+    assert any(btn.callback_data.endswith(":all") for btn in buttons)
+
+    # Clicking Sahar's button runs targeted personality analysis
+    sahar_btn = next(btn for btn in buttons if "@sahar_dev" in btn.text)
+    picker_msg = Message(
+        message_id=901,
+        date=datetime.now(timezone.utc),
+        chat=group_chat,
+        from_user=fake_bot._me,
+        text=sent_payloads[0]["text"],
+    )
+    cb_upd = Update(
+        update_id=2,
+        callback_query=CallbackQuery(
+            id="cb-vibe-1",
+            from_user=human_user,
+            chat_instance="ci-1",
+            message=picker_msg,
+            data=sahar_btn.callback_data,
+        ),
+    )
+    await dp.feed_update(fake_bot, cb_upd)
+    assert len(llm_calls) == 1
+    assert llm_calls[-1]["mode"] == "personality"
+    assert "@sahar_dev" in llm_calls[-1]["question"] or "سحر" in llm_calls[-1]["question"]
+
+    # Cross-chat callback click MUST be rejected
+    foreign_msg = Message(
+        message_id=902,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=-100999, type="supergroup", title="گروه دیگر"),
+        from_user=fake_bot._me,
+        text="other",
+    )
+    cb_foreign = Update(
+        update_id=3,
+        callback_query=CallbackQuery(
+            id="cb-vibe-2",
+            from_user=human_user,
+            chat_instance="ci-2",
+            message=foreign_msg,
+            data=sahar_btn.callback_data,
+        ),
+    )
+    await dp.feed_update(fake_bot, cb_foreign)
+    assert len(llm_calls) == 1  # No extra LLM call!
+    assert callback_answers[-1]["show_alert"] is True
+
+    # 2. Trailing-slash RTL command (`ask/ بگو مهدیار چطوری`) dispatches cleanly!
+    before = len(llm_calls)
+    rtl_ask = Update(
+        update_id=4,
+        message=Message(
+            message_id=4,
+            date=datetime.now(timezone.utc),
+            chat=group_chat,
+            from_user=human_user,
+            text="ask/ بگو مهدیار چطوری",
+        ),
+    )
+    await dp.feed_update(fake_bot, rtl_ask)
+    assert len(llm_calls) == before + 1
+    assert llm_calls[-1]["mode"] == "chat"
+    assert llm_calls[-1]["question"] == "بگو مهدیار چطوری"
+
+    # 3. Bare /vibe replying to a specific message analyzes that user instead of showing picker
+    replied = Message(
+        message_id=10,
+        date=datetime.now(timezone.utc),
+        chat=group_chat,
+        from_user=User(id=202, is_bot=False, first_name="سحر", username="sahar_dev"),
+        text="امروز خیلی خسته‌ام",
+    )
+    reply_vibe = Update(
+        update_id=5,
+        message=Message(
+            message_id=11,
+            date=datetime.now(timezone.utc),
+            chat=group_chat,
+            from_user=human_user,
+            text="/vibe",
+            reply_to_message=replied,
+        ),
+    )
+    before = len(llm_calls)
+    await dp.feed_update(fake_bot, reply_vibe)
+    assert len(llm_calls) == before + 1
+    assert llm_calls[-1]["mode"] == "personality"
+    assert "سحر" in llm_calls[-1]["question"] or "@sahar_dev" in llm_calls[-1]["question"]

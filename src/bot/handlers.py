@@ -36,6 +36,7 @@ from src.bot.keyboards import (
     build_chat_summary_reply_keyboard,
     build_feedback_keyboard,
     build_transcript_keyboard,
+    build_vibe_target_keyboard,
 )
 from src.exceptions import FileTooLargeError, ProviderChainExhaustedError
 from src.services.http_utils import redact_secrets
@@ -155,8 +156,8 @@ def _get_chat_title(message: Any) -> str:
 
 _INVISIBLE_LEADING_CHARS = "\u200e\u200f\u200b\u200c\ufeff \t\r\n"
 _RELAXED_CMD_RE = re.compile(
-    r"^/(?P<cmd>[A-Za-z0-9_\u0621-\u064A\u067E\u0686\u0698\u06A9\u06AF\u06CC]+)"
-    r"(?:@(?P<mention>[A-Za-z0-9_]+))?"
+    r"^(?:/(?P<cmd>[A-Za-z0-9_\u0621-\u064A\u067E\u0686\u0698\u06A9\u06AF\u06CC]+)(?:@(?P<mention>[A-Za-z0-9_]+))?"
+    r"|(?P<cmd_post>[A-Za-z0-9_]+)(?:@(?P<mention_post>[A-Za-z0-9_]+))?/)"
     r"(?=$|[\s\u200c\u200e\u200f:،؛؟,.?!\-])"
 )
 _INTERACTIVE_CHAT_COMMANDS = frozenset({"ask", "vibe", "personality"})
@@ -189,15 +190,16 @@ def _match_relaxed_command(
     commands: frozenset[str] | tuple[str, ...],
     bot_username: str | None = None,
 ) -> str | None:
-    """Match slash commands tolerating case, RTL marks, ZWNJ, and leading punctuation while respecting @otherbot."""
+    """Match slash commands tolerating case, RTL marks, ZWNJ, trailing slash (`ask/`), and punctuation."""
     cleaned = (raw_text or "").lstrip(_INVISIBLE_LEADING_CHARS)
     match = _RELAXED_CMD_RE.match(cleaned)
     if not match:
         return None
-    cmd = match.group("cmd").lower()
+    raw_cmd = match.group("cmd") or match.group("cmd_post") or ""
+    cmd = raw_cmd.lower()
     if cmd not in commands:
         return None
-    mention = match.group("mention")
+    mention = match.group("mention") or match.group("mention_post")
     if mention:
         target = (bot_username or "vaez_summary_bot").lstrip("@").strip().lower()
         if not target or mention.lower() != target:
@@ -208,7 +210,7 @@ def _match_relaxed_command(
 def _strip_bot_mention_and_command(
     raw_text: str, bot_username: str | None = None
 ) -> str:
-    """Remove leading /ask, /vibe, /personality command or @bot_username mention from query."""
+    """Remove leading /ask, /vibe, /personality (or RTL `ask/`, `vibe/`) or @bot_username mention."""
     text = (raw_text or "").lstrip(_INVISIBLE_LEADING_CHARS).strip()
     clean_username = (bot_username or "vaez_summary_bot").lstrip("@").strip()
     if clean_username:
@@ -216,7 +218,7 @@ def _strip_bot_mention_and_command(
             rf"@{re.escape(clean_username)}\b", "", text, flags=re.IGNORECASE
         )
     text = re.sub(
-        r"^/(?:ask|vibe|personality)(?:@[A-Za-z0-9_]+)?[\s\u200c\u200e\u200f:،,.؟?!\-]*",
+        r"^(?:/(?:ask|vibe|personality)(?:@[A-Za-z0-9_]+)?|(?:ask|vibe|personality)(?:@[A-Za-z0-9_]+)?/)[\s\u200c\u200e\u200f:،؛؟,.?!\-]*",
         "",
         text,
         flags=re.IGNORECASE,
@@ -535,8 +537,8 @@ def build_help_text(max_messages: int = MAX_CHAT_SUMMARY_MESSAGES) -> str:
         "   • **با ریپلای:** روی پیام ربات یا یکی از بچه‌ها ریپلای بزن و با منشن `@vaez_summary_bot` بپرس «منظورش چیه؟»\n"
         "   • ⚠️ **نکته مهم:** چت کردن با ربات و خلاصه‌سازی گروه فقط شامل **پیام‌های متنی** می‌شود و ربات هیچ خبری از محتوای ویس‌ها، عکس‌ها، ویدیوها و سایر فایل‌های چندرسانه‌ای ندارد (برای خلاصه ویس باید روی خود ویس ریپلای بزنید).\n\n"
         "۴. 🎭 **تحلیل تیپ شخصیت، وایب و رُست طنز (`/vibe`):**\n"
-        "   • `/vibe` ← تحلیل باحال و کل‌کل طنز با بچه‌های فعال گروه\n"
-        "   • `/vibe مهدی` یا `@vaez_summary_bot مهدی رو رست کن` ← تحلیل یا **رُست طنزآمیز و پُررو** روی یک نفر\n"
+        "   • `/vibe` از منوی ربات ← نمایش لیست آیدی/نام بچه‌های فعال برای انتخاب یک نفر (یا همه)\n"
+        "   • `/vibe @username` یا `/vibe مهدی` یا ریپلای روی پیام طرف با `/vibe` ← تحلیل و **رُست طنزآمیز** مستقیم روی همون نفر\n"
         "   • ⚠️ ربات فقط وقتی از کسی **دیتای متنی واقعی** تو چت داشته باشد رُست باحال می‌زند و اگر پیامی ازش نباشد الکی چرت‌وپرت و شوخی بی‌مزه نمی‌بافد!\n\n"
         "۵. 🛡️ **سهمیه و حریم خصوصی:**\n"
         "   • تاریخچه و سشن هر گروه/چت کاملاً از بقیه چت‌ها جداست.\n"
@@ -928,55 +930,33 @@ async def _run_chat_history_summary(
         )
 
 
-async def handle_chat_interaction(
+async def _execute_chat_qa_prompt(
     message: Any,
+    chat_id: int | str,
+    effective_question: str,
+    turn_question: str,
+    asker_name: str,
+    detected_mode: str,
     summarizer_manager: SummarizerManager,
     cache: TranscriptCache,
-    bot_username: str | None = None,
-    mode: str = "chat",
-    reply_context: str | None = None,
+    *,
+    status_updater: Any = None,
 ) -> None:
-    """Answer fun questions, analyze member personalities, or chat using ONLY `chat_id`'s isolated session."""
-    chat = getattr(message, "chat", None)
-    chat_id = getattr(chat, "id", "private")
-    raw_text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
-    question = _strip_bot_mention_and_command(raw_text, bot_username=bot_username)
-
-    if mode == "personality" and not question:
-        question = "شخصیت و وایب اعضای فعال این گفتگو رو با لحن بامزه و فان تحلیل کن!"
-    elif not question and reply_context:
-        question = "این پیام رو با توجه به حال‌وهوای گفتگو یه توضیح یا جواب کوتاه و باحال بده!"
-    elif not question:
-        await _safe_reply(
-            message,
-            format_telegram_html(
-                "😎 پایه‌ام! درباره صحبت‌های بچه‌های همین چت هر سوالی داری بپرس:\n\n"
-                "• مثلاً: `/ask سحر چی گفته؟` یا `@vaez_summary_bot سحر چی گفته؟`\n"
-                "• یا روی یه پیام ریپلای کن و بنویس `/ask`\n"
-                "• یا با `/vibe` شخصیت بچه‌های گروه رو تحلیل کن!"
-            ),
-        )
-        return
-
-    effective_question = (
-        f"(در پاسخ به پیام «{reply_context}»)\n{question}" if reply_context else question
-    )
-    rate_msg = _enforce_chat_rate_limit(chat_id, cache)
-    if rate_msg is not None:
-        await _safe_reply(message, format_telegram_html(rate_msg))
-        return
-
-    detected_mode = mode
-    if detected_mode == "chat" and any(kw in question.lower() for kw in _PERSONALITY_KEYWORDS):
-        detected_mode = "personality"
-
-    asker_name = extract_chat_sender_label(message)
+    """Run LLM chat/personality inference on `chat_id`'s isolated state and deliver safe HTML output."""
     recent_messages = cache.get_recent_chat_messages(chat_id, limit=MAX_CHAT_SUMMARY_MESSAGES)
     chat_history = _trim_history_to_recent_chars(
         "\n".join(f"[{m.sender}]: {m.text}" for m in recent_messages)
     )
     session_turns = cache.get_chat_session_turns(chat_id)
     detected_lang = normalize_language(None, effective_question)
+
+    logger.info(
+        "Executing chat QA: chat_id=%s chat_type=%s mode=%s history_msgs=%d",
+        chat_id,
+        getattr(getattr(message, "chat", None), "type", "unknown"),
+        detected_mode,
+        len(recent_messages),
+    )
 
     try:
         result = await summarizer_manager.chat(
@@ -996,14 +976,22 @@ async def handle_chat_interaction(
             language=result.language,
         )
         fb_keyboard = build_feedback_keyboard(fb_id, language=result.language)
-        chunks = split_telegram_html(safe_reply, max_len=3950)
-        for idx, chunk in enumerate(chunks):
-            markup = fb_keyboard if idx == len(chunks) - 1 else None
-            await _safe_reply(message, chunk, reply_markup=markup)
+        if status_updater is not None:
+            await _delete_and_send_chunks(
+                origin_message=message,
+                status_msg=status_updater,
+                raw_text=safe_reply,
+                reply_markup=fb_keyboard,
+            )
+        else:
+            chunks = split_telegram_html(safe_reply, max_len=3950)
+            for idx, chunk in enumerate(chunks):
+                markup = fb_keyboard if idx == len(chunks) - 1 else None
+                await _safe_reply(message, chunk, reply_markup=markup)
         cache.add_chat_turn(
             chat_id=chat_id,
             user_name=asker_name,
-            question=sanitize_sensitive_text(question),
+            question=sanitize_sensitive_text(turn_question),
             answer=safe_reply,
         )
     except Exception as exc:  # noqa: BLE001
@@ -1018,9 +1006,170 @@ async def handle_chat_interaction(
             else "❌ الان مغزم یکم شلوغ شد، چند لحظه دیگه دوباره سوالتو بپرس!"
         )
         try:
-            await _safe_reply(message, err_reply)
+            if status_updater is not None:
+                await _delete_and_send_output(
+                    origin_message=message,
+                    status_msg=status_updater,
+                    text=err_reply,
+                    reply_markup=None,
+                )
+            else:
+                await _safe_reply(message, err_reply)
         except Exception as reply_exc:  # noqa: BLE001
             logger.warning("Could not deliver fallback error reply: %s", reply_exc)
+
+
+async def handle_chat_interaction(
+    message: Any,
+    summarizer_manager: SummarizerManager,
+    cache: TranscriptCache,
+    bot_username: str | None = None,
+    mode: str = "chat",
+    reply_context: str | None = None,
+) -> None:
+    """Answer fun questions, show /vibe target picker, or chat using ONLY `chat_id`'s isolated session."""
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", "private")
+    raw_text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    question = _strip_bot_mention_and_command(raw_text, bot_username=bot_username)
+
+    if mode == "personality" and not question:
+        if reply_context:
+            question = "فقط شخصیت، وایب و رُست طنز فرستنده همین پیام ریپلای‌شده را بر اساس پیام‌های واقعی خودش توی این چت تحلیل کن!"
+        else:
+            senders = cache.get_recent_chat_senders(chat_id, max_senders=8)
+            if not senders:
+                await _safe_reply(
+                    message,
+                    format_telegram_html(
+                        "📭 هنوز پیامی از بچه‌های این گفتگو ثبت نشده که وایب کسی رو دربیارم!\n\n"
+                        "• چند تا پیام توی چت ردوبدل بشه، دوباره `/vibe` رو بزن تا لیست یوزرنیم‌ها بیاد.\n"
+                        "• یا مستقیم بنویس `/vibe @username` یا روی پیام یکی ریپلای کن و بزن `/vibe`."
+                    ),
+                )
+                return
+            picker_id = cache.create_vibe_picker(chat_id, senders)
+            await _safe_reply(
+                message,
+                format_telegram_html(
+                    "🎭 **وایب و رُستِ کی رو دربیارم؟**\n"
+                    "از لیست زیر یوزرنیم/نام شخص مورد نظر را انتخاب کن (یا `/vibe @username` بنویس / روی پیامش `/vibe` ریپلای کن):"
+                ),
+                reply_markup=build_vibe_target_keyboard(picker_id, senders),
+            )
+            return
+    elif not question and reply_context:
+        question = "این پیام رو با توجه به حال‌وهوای گفتگو یه توضیح یا جواب کوتاه و باحال بده!"
+    elif not question:
+        await _safe_reply(
+            message,
+            format_telegram_html(
+                "😎 پایه‌ام! درباره صحبت‌های بچه‌های همین چت هر سوالی داری بپرس:\n\n"
+                "• مثلاً: `/ask سحر چی گفته؟` یا `@vaez_summary_bot سحر چی گفته؟`\n"
+                "• یا روی یه پیام ریپلای کن و بنویس `/ask`\n"
+                "• یا با `/vibe` یوزرنیم یکی از بچه‌ها رو انتخاب کن و وایبش رو ببین!"
+            ),
+        )
+        return
+
+    effective_question = (
+        f"(در پاسخ به پیام «{reply_context}»)\n{question}" if reply_context else question
+    )
+    rate_msg = _enforce_chat_rate_limit(chat_id, cache)
+    if rate_msg is not None:
+        await _safe_reply(message, format_telegram_html(rate_msg))
+        return
+
+    detected_mode = mode
+    if detected_mode == "chat" and any(kw in question.lower() for kw in _PERSONALITY_KEYWORDS):
+        detected_mode = "personality"
+
+    asker_name = extract_chat_sender_label(message)
+    await _execute_chat_qa_prompt(
+        message=message,
+        chat_id=chat_id,
+        effective_question=effective_question,
+        turn_question=question,
+        asker_name=asker_name,
+        detected_mode=detected_mode,
+        summarizer_manager=summarizer_manager,
+        cache=cache,
+    )
+
+
+async def handle_vibe_callback(
+    callback: Any,
+    summarizer_manager: SummarizerManager,
+    cache: TranscriptCache,
+) -> None:
+    """Handle click on `vibe:<picker_id>:<idx|all>` member selector buttons."""
+    data = getattr(callback, "data", "") or ""
+    parts = data.split(":", 2)
+    picker_id = parts[1] if len(parts) > 1 else ""
+    choice = parts[2] if len(parts) > 2 else ""
+
+    msg = getattr(callback, "message", None)
+    if msg is None:
+        await callback.answer("⛔ این پیام دیگر در دسترس نیست.", show_alert=True)
+        return
+
+    picker = cache.get_vibe_picker(picker_id)
+    if picker is None:
+        await callback.answer("⏳ این لیست انتخاب منقضی شده؛ دوباره /vibe رو بزن!", show_alert=True)
+        return
+
+    expected_chat_id, targets = picker
+    chat = getattr(msg, "chat", None)
+    chat_id = getattr(chat, "id", "private")
+    if str(chat_id) != str(expected_chat_id):
+        await callback.answer("⛔ این دکمه متعلق به چت دیگری است.", show_alert=True)
+        return
+
+    if choice == "all":
+        question = "شخصیت و وایب اعضای فعال این گفتگو رو با لحن بامزه، تیز و رُست فان تحلیل کن!"
+        status_label = "🔥 در حال تحلیل وایب همه بچه‌های فعال..."
+    else:
+        try:
+            idx = int(choice)
+            target_sender = targets[idx]
+        except (ValueError, IndexError):
+            await callback.answer("⛔ گزینه انتخاب‌شده نامعتبر است.", show_alert=True)
+            return
+        question = (
+            f"فقط شخصیت، وایب و رُست طنز «{target_sender}» رو بر اساس پیام‌های واقعی خودش توی همین چت تحلیل کن!"
+        )
+        status_label = f"🎭 در حال تحلیل وایب {target_sender}..."
+
+    rate_msg = _enforce_chat_rate_limit(chat_id, cache)
+    if rate_msg is not None:
+        await callback.answer("⏳ سقف استفاده این چت موقتاً پر شده!", show_alert=True)
+        await _safe_reply(msg, format_telegram_html(rate_msg))
+        return
+
+    await callback.answer(status_label)
+    clicker = getattr(callback, "from_user", None)
+    asker_name = (
+        getattr(clicker, "full_name", None)
+        or getattr(clicker, "first_name", None)
+        or "کاربر"
+    )
+    if hasattr(msg, "edit_text"):
+        try:
+            await msg.edit_text(html.escape(status_label, quote=False))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not edit vibe picker status message: %s", exc)
+
+    await _execute_chat_qa_prompt(
+        message=msg,
+        chat_id=chat_id,
+        effective_question=question,
+        turn_question=question,
+        asker_name=asker_name,
+        detected_mode="personality",
+        summarizer_manager=summarizer_manager,
+        cache=cache,
+        status_updater=msg,
+    )
 
 
 async def handle_chat_summary_command(
@@ -2003,6 +2152,10 @@ def create_bot_router(
     @router.callback_query(F.data.startswith("chatsum:"))
     async def on_chat_summary_button(callback: CallbackQuery) -> None:
         await handle_chat_summary_callback(callback, summarizer_manager, cache)
+
+    @router.callback_query(F.data.startswith("vibe:"))
+    async def on_vibe_target_button(callback: CallbackQuery) -> None:
+        await handle_vibe_callback(callback, summarizer_manager, cache)
 
     @router.callback_query(F.data.startswith("transcript:"))
     async def on_transcript_button(callback: CallbackQuery) -> None:

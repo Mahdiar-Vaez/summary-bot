@@ -101,6 +101,7 @@ class TranscriptCache:
         self._chat_sessions: OrderedDict[str, deque[tuple[str, str, str]]] = OrderedDict()
         self._chat_rate_windows: OrderedDict[str, deque[float]] = OrderedDict()
         self._prompt_message_ids: OrderedDict[str, int] = OrderedDict()
+        self._vibe_pickers: OrderedDict[str, tuple[str, list[str]]] = OrderedDict()
         self._feedbacks: OrderedDict[str, FeedbackEntry] = OrderedDict()
         self._users_stats: dict[str, dict[str, Any]] = {}
         self._chats_stats: dict[str, dict[str, Any]] = {}
@@ -475,6 +476,45 @@ class TranscriptCache:
 
     def pop_prompt_message_id(self, chat_id: int | str) -> int | None:
         return self._prompt_message_ids.pop(str(chat_id), None)
+
+    def get_recent_chat_senders(
+        self, chat_id: int | str, *, max_senders: int = 8
+    ) -> list[str]:
+        """Return unique active sender labels for `chat_id`, ordered most-recent first."""
+        entries = self._chat_history.get(str(chat_id))
+        if not entries:
+            return []
+        senders: list[str] = []
+        seen_lower: set[str] = set()
+        for entry in reversed(entries):
+            raw_sender = (entry.sender or "").strip()
+            if raw_sender.endswith(" (ویس)"):
+                raw_sender = raw_sender[: -len(" (ویس)")].strip()
+            if not raw_sender or raw_sender in {"کاربر", "گوینده"}:
+                continue
+            key = raw_sender.lower()
+            if key in seen_lower:
+                continue
+            seen_lower.add(key)
+            senders.append(raw_sender)
+            if len(senders) >= max(1, int(max_senders)):
+                break
+        return senders
+
+    def create_vibe_picker(self, chat_id: int | str, targets: list[str]) -> str:
+        """Create a short-ID inline picker mapping for `/vibe` member selection."""
+        while len(self._vibe_pickers) >= max(self.max_items, 500):
+            self._vibe_pickers.popitem(last=False)
+        picker_id = uuid.uuid4().hex[:8]
+        self._vibe_pickers[picker_id] = (str(chat_id), list(targets))
+        return picker_id
+
+    def get_vibe_picker(self, picker_id: str) -> tuple[str, list[str]] | None:
+        """Return `(chat_id, targets)` for `picker_id` if still cached."""
+        item = self._vibe_pickers.get(picker_id)
+        if item is not None:
+            self._vibe_pickers.move_to_end(picker_id)
+        return item
 
     def _evict_expired(self) -> None:
         now = time.monotonic()

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
+
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
 )
+
+_HANDLE_IN_SENDER_RE = re.compile(r"\(@([A-Za-z0-9_]+)\)\s*$")
 
 
 def build_feedback_row(fb_id: str, language: str = "fa") -> list[InlineKeyboardButton]:
@@ -121,3 +125,49 @@ def build_chat_summary_count_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def _format_vibe_button_label(sender: str) -> str:
+    """Format a sender label putting `@username` first when present for dropdown readability."""
+    clean = " ".join((sender or "").split())
+    match = _HANDLE_IN_SENDER_RE.search(clean)
+    if match:
+        handle = match.group(1)
+        display_part = clean[: match.start()].strip()
+        if display_part:
+            short_name = display_part if len(display_part) <= 14 else f"{display_part[:13]}…"
+            label = f"👤 @{handle} ({short_name})"
+        else:
+            label = f"👤 @{handle}"
+    else:
+        label = f"👤 {clean}"
+    return label if len(label) <= 34 else f"{label[:33]}…"
+
+
+def build_vibe_target_keyboard(
+    picker_id: str, targets: list[str]
+) -> InlineKeyboardMarkup:
+    """Create inline buttons to select a member (with @username) or all active members for /vibe."""
+    rows: list[list[InlineKeyboardButton]] = []
+    current_row: list[InlineKeyboardButton] = []
+    for idx, sender in enumerate(targets):
+        btn = InlineKeyboardButton(
+            text=_format_vibe_button_label(sender),
+            callback_data=f"vibe:{picker_id}:{idx}",
+        )
+        current_row.append(btn)
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔥 تحلیل و رُست همه بچه‌های فعال",
+                callback_data=f"vibe:{picker_id}:all",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
