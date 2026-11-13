@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import inspect
 import logging
 import re
 import tempfile
@@ -40,6 +41,12 @@ from src.bot.keyboards import (
 )
 from src.exceptions import FileTooLargeError, ProviderChainExhaustedError
 from src.services.http_utils import redact_secrets
+from src.services.search.web_search import (
+    WebSearchService,
+    extract_auto_search_query,
+    should_presearch_query,
+    strip_search_directives,
+)
 from src.services.stt.base import normalize_language
 from src.services.stt.manager import STTManager
 from src.services.summarizer.manager import SummarizerManager
@@ -531,15 +538,15 @@ def build_help_text(max_messages: int = MAX_CHAT_SUMMARY_MESSAGES) -> str:
         f"۲. 💬 **خلاصه‌سازی پیام‌های گروه و چنل (تا {max_messages} پیام آخر):**\n"
         "   • دستور `/chat_summary` را بزن و از دکمه‌های پایین صفحه (`۱۰` تا `۲۰۰` پیام) انتخاب کن.\n"
         f"   • یا مستقیم عدد بفرست، مثلاً: `/chat_summary 250` یا `/summary_100`.\n\n"
-        f"۳. 😎 **چت و سؤال درباره حرف‌های بچه‌ها (با حافظه {max_messages} پیام اخیرِ همین چت):**\n"
-        "   • **با منشن آیدی ربات:** `@vaez_summary_bot سحر چی گفته؟`\n"
-        "   • **با دستور `/ask`:** `/ask مهدی راجع به جلسه چی گفت؟`\n"
-        "   • **با ریپلای:** روی پیام ربات یا یکی از بچه‌ها ریپلای بزن و با منشن `@vaez_summary_bot` بپرس «منظورش چیه؟»\n"
-        "   • ⚠️ **نکته مهم:** چت کردن با ربات و خلاصه‌سازی گروه فقط شامل **پیام‌های متنی** می‌شود و ربات هیچ خبری از محتوای ویس‌ها، عکس‌ها، ویدیوها و سایر فایل‌های چندرسانه‌ای ندارد (برای خلاصه ویس باید روی خود ویس ریپلای بزنید).\n\n"
-        "۴. 🎭 **تحلیل محترمانه سبک گفتگو و حال‌وهوا (`/vibe`):**\n"
+        f"۳. 😎 **چت و سؤال درباره حرف‌های بچه‌ها یا هر موضوع متفرقه (با حافظه {max_messages} پیام اخیر + سرچ خودکار وب):**\n"
+        "   • **با منشن آیدی ربات:** `@vaez_summary_bot سحر چی گفته؟` یا `@vaez_summary_bot قیمت طلا چنده؟`\n"
+        "   • **با دستور `/ask`:** `/ask مهدی راجع به جلسه چی گفت؟` یا هر سؤال متفرقه و گفتگوی آزاد در گروه و پیوی\n"
+        "   • **با ریپلای:** روی پیام ربات یا یکی از بچه‌ها ریپلای بزن و حرفت را بپرس\n"
+        "   • ⚠️ **نکته مهم:** ربات در گفتگوها فقط به **پیام‌های متنی** گروه دسترسی دارد (نه محتوای ویس‌ها، عکس‌ها، ویدیوها و سایر فایل‌های چندرسانه‌ای؛ برای خلاصه ویس روی خود ویس ریپلای بزنید) و برای موضوعات خارج از چت در صورت نیاز خودکار وب را سرچ می‌کند.\n\n"
+        "۴. 🎭 **تحلیل سبک گفتگو و وایب اعضا (`/vibe`):**\n"
         "   • `/vibe` از منوی ربات ← نمایش لیست آیدی/نام اعضای فعال برای انتخاب یک نفر (یا همه)\n"
-        "   • `/vibe @username` یا `/vibe مهدی` یا ریپلای روی پیام فرد با `/vibe` ← بررسی محترمانه و دقیق سبک پیام‌های همان شخص\n"
-        "   • ⚠️ ربات فقط بر اساس **پیام‌های متنی واقعی** ثبت‌شده در همین چت پاسخ می‌دهد و هرگز مطالب غیرواقعی یا حدس بی‌اساس نمی‌سازد.\n\n"
+        "   • `/vibe @username` یا `/vibe مهدی` یا ریپلای روی پیام فرد با `/vibe` ← بررسی تیزبین و خوش‌صحبت سبک پیام‌های همان شخص\n"
+        "   • ⚠️ ربات فقط بر اساس **پیام‌های متنی واقعی** ثبت‌شده در همین چت درباره اعضا نظر می‌دهد و حدس بی‌اساس نمی‌سازد.\n\n"
         "۵. 🛡️ **سهمیه و حریم خصوصی:**\n"
         "   • تاریخچه و سشن هر گروه/چت کاملاً از بقیه چت‌ها جداست.\n"
         "   • برای جلوگیری از شلوغی، در هر گروه/چت حداکثر **۵ درخواست هوشمند در هر ۵ دقیقه** مجاز است.\n"
@@ -930,6 +937,47 @@ async def _run_chat_history_summary(
         )
 
 
+async def _call_chat_with_optional_web(
+    summarizer_manager: SummarizerManager,
+    *,
+    chat_history: str,
+    session_turns: list[tuple[str, str]],
+    question: str,
+    asker_name: str,
+    mode: str,
+    language: str,
+    web_context: str | None = None,
+) -> Any:
+    """Invoke summarizer_manager.chat passing `web_context` cleanly even for minimal mock providers."""
+    sig = inspect.signature(summarizer_manager.chat)
+    accepts_web = "web_context" in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+    if accepts_web:
+        return await summarizer_manager.chat(
+            chat_history=chat_history,
+            session_turns=session_turns,
+            question=question,
+            asker_name=asker_name,
+            mode=mode,
+            language=language,
+            web_context=web_context,
+        )
+    effective_q = (
+        f"{question}\n\n[نتایج جست‌وجوی وب]:\n{web_context}"
+        if web_context
+        else question
+    )
+    return await summarizer_manager.chat(
+        chat_history=chat_history,
+        session_turns=session_turns,
+        question=effective_q,
+        asker_name=asker_name,
+        mode=mode,
+        language=language,
+    )
+
+
 async def _execute_chat_qa_prompt(
     message: Any,
     chat_id: int | str,
@@ -941,8 +989,9 @@ async def _execute_chat_qa_prompt(
     cache: TranscriptCache,
     *,
     status_updater: Any = None,
+    web_search: WebSearchService | None = None,
 ) -> None:
-    """Run LLM chat/personality inference on `chat_id`'s isolated state and deliver safe HTML output."""
+    """Run LLM chat/personality inference with optional auto web search and deliver safe HTML output."""
     recent_messages = cache.get_recent_chat_messages(chat_id, limit=MAX_CHAT_SUMMARY_MESSAGES)
     chat_history = _trim_history_to_recent_chars(
         "\n".join(f"[{m.sender}]: {m.text}" for m in recent_messages)
@@ -959,15 +1008,51 @@ async def _execute_chat_qa_prompt(
     )
 
     try:
-        result = await summarizer_manager.chat(
+        web_context: str | None = None
+        if (
+            detected_mode == "chat"
+            and web_search is not None
+            and should_presearch_query(turn_question)
+        ):
+            fetched = await web_search.search(turn_question, language=detected_lang)
+            if fetched:
+                web_context = fetched
+
+        result = await _call_chat_with_optional_web(
+            summarizer_manager,
             chat_history=chat_history,
             session_turns=session_turns,
             question=effective_question,
             asker_name=asker_name,
             mode=detected_mode,
             language=detected_lang,
+            web_context=web_context,
         )
-        safe_reply = sanitize_sensitive_text(result.summary)
+
+        # One-hop LLM-triggered auto-search (`[[SEARCH: ...]]`) if pre-search didn't run
+        if detected_mode == "chat" and web_context is None and web_search is not None:
+            auto_query = extract_auto_search_query(result.summary)
+            if auto_query:
+                logger.info("Auto web search requested for chat_id=%s query=%r", chat_id, auto_query[:80])
+                auto_context = await web_search.search(auto_query, language=detected_lang)
+                fallback_note = (
+                    "(جست‌وجوی وب نتیجه مستقیمی برنگرداند؛ لطفاً با دانش خودت و لحن طبیعی، کوتاه و صادقانه جواب بده.)"
+                )
+                result = await _call_chat_with_optional_web(
+                    summarizer_manager,
+                    chat_history=chat_history,
+                    session_turns=session_turns,
+                    question=effective_question,
+                    asker_name=asker_name,
+                    mode=detected_mode,
+                    language=detected_lang,
+                    web_context=auto_context or fallback_note,
+                )
+
+        cleaned_summary = strip_search_directives(result.summary)
+        if not cleaned_summary:
+            cleaned_summary = "❌ الان نتیجه دقیقی دستم نیومد؛ یکم واضح‌تر بپرس تا دوباره چک کنم!"
+        safe_reply = sanitize_sensitive_text(cleaned_summary)
         fb_id = cache.create_feedback_target(
             output_type="chat_qa",
             chat_id=chat_id,
@@ -1026,8 +1111,9 @@ async def handle_chat_interaction(
     bot_username: str | None = None,
     mode: str = "chat",
     reply_context: str | None = None,
+    web_search: WebSearchService | None = None,
 ) -> None:
-    """Answer fun questions, show /vibe target picker, or chat using ONLY `chat_id`'s isolated session."""
+    """Answer chat or open-ended questions, show /vibe target picker, or chat per isolated session."""
     chat = getattr(message, "chat", None)
     chat_id = getattr(chat, "id", "private")
     raw_text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
@@ -1035,15 +1121,15 @@ async def handle_chat_interaction(
 
     if mode == "personality" and not question:
         if reply_context:
-            question = "لطفاً شخصیت، حال‌وهوا و سبک گفتگوی فرستنده همین پیام ریپلای‌شده را به‌صورت محترمانه و بر اساس پیام‌های واقعی خودش در این چت بررسی کن."
+            question = "لطفاً شخصیت، حال‌وهوا و سبک گفتگوی فرستنده همین پیام ریپلای‌شده را به‌صورت تیزبین و خوش‌صحبت از روی پیام‌های واقعی خودش در همین چت تحلیل کن."
         else:
             senders = cache.get_recent_chat_senders(chat_id, max_senders=8)
             if not senders:
                 await _safe_reply(
                     message,
                     format_telegram_html(
-                        "📭 هنوز پیامی از اعضای این گفتگو ثبت نشده است که بتوانم تحلیلش کنم.\n\n"
-                        "• پس از ردوبدل شدن چند پیام در چت، دوباره `/vibe` را بزنید تا لیست یوزرنیم‌ها نمایش داده شود.\n"
+                        "📭 هنوز پیامی از بچه‌های این گفتگو ثبت نشده است که تحلیلش کنم.\n\n"
+                        "• بعد از چند پیام در چت، دوباره `/vibe` را بزنید تا لیست یوزرنیم‌ها باز شود.\n"
                         "• یا مستقیم بنویسید `/vibe @username` یا روی پیام فرد موردنظر ریپلای کرده و `/vibe` بفرستید."
                     ),
                 )
@@ -1052,22 +1138,22 @@ async def handle_chat_interaction(
             await _safe_reply(
                 message,
                 format_telegram_html(
-                    "🎭 **تحلیل سبک گفتگو برای کدام کاربر انجام شود؟**\n"
-                    "از فهرست زیر یوزرنیم یا نام کاربر موردنظر را انتخاب کنید (یا `/vibe @username` بنویسید / روی پیام او `/vibe` ریپلای کنید):"
+                    "🎭 **وایب و سبک گفتگوی کدام کاربر را بررسی کنم؟**\n"
+                    "از لیست زیر یوزرنیم یا نام شخص مورد نظر را انتخاب کنید (یا `/vibe @username` بنویسید / روی پیامش `/vibe` ریپلای کنید):"
                 ),
                 reply_markup=build_vibe_target_keyboard(picker_id, senders),
             )
             return
     elif not question and reply_context:
-        question = "لطفاً درباره این پیام با توجه به بافت گفتگو یک توضیح محترمانه و کوتاه ارائه بده."
+        question = "لطفاً درباره این پیام با توجه به بافت گفتگو یک توضیح کوتاه و باحال بده."
     elif not question:
         await _safe_reply(
             message,
             format_telegram_html(
-                "👋 در خدمتم! درباره پیام‌های همین گفتگو هر سؤالی دارید بفرمایید:\n\n"
-                "• مثلاً: `/ask سحر چی گفته؟` یا `@vaez_summary_bot سحر چی گفته؟`\n"
-                "• یا روی یک پیام ریپلای کنید و `/ask` را بفرستید.\n"
-                "• یا با `/vibe` یوزرنیم یکی از اعضا را برای تحلیل سبک گفتگو انتخاب کنید."
+                "😎 پایه‌ام! چه درباره حرف‌های بچه‌های چت، چه هر سؤال متفرقه یا خبر و قیمتی داری بپرس:\n\n"
+                "• مثلاً: `/ask سحر چی گفته؟` یا `@vaez_summary_bot قیمت طلا چنده؟`\n"
+                "• یا روی یک پیام ریپلای کن و بنویس `/ask`\n"
+                "• یا با `/vibe` یوزرنیم یکی از بچه‌ها رو انتخاب کن تا سبک وایبش رو بگم!"
             ),
         )
         return
@@ -1094,6 +1180,7 @@ async def handle_chat_interaction(
         detected_mode=detected_mode,
         summarizer_manager=summarizer_manager,
         cache=cache,
+        web_search=web_search,
     )
 
 
@@ -1694,9 +1781,11 @@ def create_bot_router(
     cache: TranscriptCache,
     tts_manager: TTSManager | None = None,
     max_file_size_mb: int = 20,
+    web_search: WebSearchService | None = None,
 ) -> Router:
     """Create and wire the aiogram Router with all commands, chat Q&A, voice handlers, and callbacks."""
     router = Router(name="voice_summary_router")
+    search_service = web_search if web_search is not None else WebSearchService()
     bot_identity: dict[str, Any] = {"id": None, "username": None, "first_name": None}
 
     async def _ensure_bot_identity(message: Message) -> None:
@@ -1793,6 +1882,7 @@ def create_bot_router(
                 bot_username=bot_identity["username"],
                 mode=mode,
                 reply_context=_extract_and_record_reply_context(message),
+                web_search=search_service,
             )
             return True
         if matched in _SUMMARY_COMMANDS and extract_voice_target(message) is not None:
@@ -1925,6 +2015,7 @@ def create_bot_router(
             bot_username=bot_identity["username"],
             mode="personality",
             reply_context=_extract_and_record_reply_context(message),
+            web_search=search_service,
         )
 
     @router.message(Command("ask", ignore_case=True))
@@ -1937,6 +2028,7 @@ def create_bot_router(
             bot_username=bot_identity["username"],
             mode="chat",
             reply_context=_extract_and_record_reply_context(message),
+            web_search=search_service,
         )
 
     @router.message(Command("reset_chat", ignore_case=True))
@@ -2037,11 +2129,23 @@ def create_bot_router(
             bot_username=bot_identity["username"],
             bot_first_name=bot_identity["first_name"],
         ):
+            replied_body = (
+                getattr(replied_msg, "text", None)
+                or getattr(replied_msg, "caption", None)
+                or ""
+            ).strip()
+            ephemeral_ctx = (
+                f"پیام قبلی من (ربات): {replied_body[:200]}"
+                if replied_body
+                else None
+            )
             await handle_chat_interaction(
                 message=message,
                 summarizer_manager=summarizer_manager,
                 cache=cache,
                 bot_username=bot_identity["username"],
+                reply_context=ephemeral_ctx,
+                web_search=search_service,
             )
             return
 
@@ -2072,6 +2176,7 @@ def create_bot_router(
                 cache=cache,
                 bot_username=bot_identity["username"],
                 reply_context=_extract_and_record_reply_context(message),
+                web_search=search_service,
             )
             return
 
@@ -2138,6 +2243,7 @@ def create_bot_router(
                 summarizer_manager=summarizer_manager,
                 cache=cache,
                 bot_username=bot_identity["username"],
+                web_search=search_service,
             )
             if getattr(getattr(message, "chat", None), "type", None) == "private":
                 record_incoming_chat_message(message, cache, deduplicate_recent=True)

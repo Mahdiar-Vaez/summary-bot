@@ -1065,7 +1065,7 @@ def test_help_text_and_fallback_chain_order():
     assert "۵ درخواست هوشمند در هر ۵ دقیقه" in help_msg
     assert "پیام‌های متنی" in help_msg
     assert "فایل‌های چندرسانه‌ای" in help_msg
-    assert "محترمانه" in help_msg
+    assert "متفرقه" in help_msg
     assert "حدس بی‌اساس" in help_msg
 
     settings = Settings(

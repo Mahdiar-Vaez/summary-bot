@@ -108,6 +108,7 @@ class OpenAICompatibleSummarizerProvider:
         asker_name: str,
         mode: str = "chat",
         language: str = "fa",
+        web_context: str | None = None,
     ) -> SummaryResult:
         norm_lang = normalize_language(language, f"{question}\n{chat_history}")
         system_prompt, user_prompt = build_chat_qa_prompt(
@@ -117,6 +118,7 @@ class OpenAICompatibleSummarizerProvider:
             asker_name=asker_name,
             mode=mode,
             language=norm_lang,
+            web_context=web_context,
         )
         return await self._generate(
             system_prompt,

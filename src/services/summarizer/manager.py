@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Callable, Awaitable, Sequence
 
@@ -61,15 +62,38 @@ class SummarizerManager:
         asker_name: str,
         mode: str = "chat",
         language: str = "fa",
+        web_context: str | None = None,
     ) -> SummaryResult:
         """Try each provider in order to generate an isolated chat Q&A or personality response."""
-        return await self._run_chain(
-            lambda p: p.chat(
+
+        def _invoke(p: SummarizerProvider) -> Awaitable[SummaryResult]:
+            sig = inspect.signature(p.chat)
+            accepts_web = "web_context" in sig.parameters or any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in sig.parameters.values()
+            )
+            if accepts_web:
+                return p.chat(
+                    chat_history=chat_history,
+                    session_turns=session_turns,
+                    question=question,
+                    asker_name=asker_name,
+                    mode=mode,
+                    language=language,
+                    web_context=web_context,
+                )
+            effective_q = (
+                f"{question}\n\n[نتایج جست‌وجوی وب]:\n{web_context}"
+                if web_context
+                else question
+            )
+            return p.chat(
                 chat_history=chat_history,
                 session_turns=session_turns,
-                question=question,
+                question=effective_q,
                 asker_name=asker_name,
                 mode=mode,
                 language=language,
             )
-        )
+
+        return await self._run_chain(_invoke)

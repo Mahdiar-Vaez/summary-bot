@@ -1278,32 +1278,36 @@ async def test_vibe_dropdown_shows_username_picker_and_trailing_slash_commands(t
     assert "سحر" in llm_calls[-1]["question"] or "@sahar_dev" in llm_calls[-1]["question"]
 
 
-def test_chat_qa_prompt_is_standard_polite_respectful_assistant():
-    """Verify FA and EN chat prompts configure a polite, respectful, standard AI assistant without rudeness."""
+def test_chat_qa_prompt_balances_playfulness_stalker_recall_and_offtopic_search():
+    """Verify FA and EN chat prompts balance playful mischief + observant recall without rudeness, plus off-topic search."""
     from src.services.summarizer.prompts import build_chat_qa_prompt
 
-    sys_fa, _ = build_chat_qa_prompt(
+    sys_fa, user_fa = build_chat_qa_prompt(
         chat_history="[مهدیار]: فردا ساعت ۵ دیپلوی می‌کنیم",
         session_turns=[],
-        question="ببخشید سحر چی گفت؟",
+        question="قیمت طلا چنده؟",
         asker_name="کاربر",
         mode="chat",
         language="fa",
+        web_context="• [نرخ TGJU] طلای ۱۸ عیار: 25,178,400 تومان",
     )
-    assert "محترم" in sys_fa
-    assert "باادب" in sys_fa
-    assert "گستاخانه" in sys_fa  # explicitly forbidden
+    assert "شیطنت" in sys_fa
+    assert "استاکر" in sys_fa
+    assert "گستاخ" in sys_fa  # explicitly avoids rudeness
+    assert "متفرقه" in sys_fa
     assert "مهدیار واعظ" in sys_fa
+    assert "25,178,400 تومان" in user_fa
 
     sys_en, _ = build_chat_qa_prompt(
         chat_history="[Ali]: deploying at 5pm",
         session_turns=[],
-        question="Excuse me, what did Ali say?",
+        question="What is the gold price today?",
         asker_name="User",
         mode="chat",
         language="en",
     )
-    assert "polite" in sys_en.lower()
-    assert "respectful" in sys_en.lower()
-    assert "never be rude" in sys_en.lower()
+    assert "playfully mischievous" in sys_en.lower()
+    assert "stalker-sharp" in sys_en.lower()
+    assert "never rude" in sys_en.lower()
+    assert "[[SEARCH:" in sys_en
     assert "Mahdiar Vaez" in sys_en

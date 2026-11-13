@@ -13,6 +13,7 @@ from aiogram.types import BotCommand
 from src.bot.cache import TranscriptCache
 from src.bot.handlers import create_bot_router
 from src.config import Settings
+from src.services.search.web_search import WebSearchService
 from src.services.stt.base import STTProvider
 from src.services.stt.cloudflare_stt import CloudflareWhisperProvider
 from src.services.stt.gemini_stt import GeminiAudioSTTProvider
@@ -140,6 +141,7 @@ def build_dispatcher(settings: Settings) -> Dispatcher:
             cache=cache,
             tts_manager=tts_manager,
             max_file_size_mb=settings.max_file_size_mb,
+            web_search=WebSearchService(),
         )
     )
     return dp

@@ -33,5 +33,6 @@ class SummarizerProvider(Protocol):
         asker_name: str,
         mode: str = "chat",
         language: str = "fa",
+        web_context: str | None = None,
     ) -> SummaryResult:
-        """Generate a fun conversational reply grounded strictly in this chat's isolated history."""
+        """Generate a conversational reply grounded in chat history and optional live web context."""
