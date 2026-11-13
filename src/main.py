@@ -227,24 +227,32 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     )
+    # Prevent httpx/httpcore INFO logs from printing full request URLs or tokens in container logs
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     settings = Settings()
     if not settings.has_any_stt_provider():
         raise RuntimeError(
-            "No STT provider configured! Please set GEMINI_API_KEY or GROQ_API_KEY in your .env file."
+            "No STT provider configured! Set GEMINI_API_KEY, GROQ_API_KEY, "
+            "or CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN in your .env file."
         )
     if not settings.has_any_llm_provider():
         raise RuntimeError(
-            "No LLM provider configured! Please set GEMINI_API_KEY or GROQ_API_KEY in your .env file."
+            "No LLM provider configured! Set GEMINI_API_KEY, GROQ_API_KEY, "
+            "OPENROUTER_API_KEY, or FALLBACK_LLM_API_KEY + FALLBACK_LLM_BASE_URL in your .env file."
         )
 
     bot = Bot(
-        token=settings.telegram_bot_token,
+        token=settings.telegram_bot_token.strip(),
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    await configure_bot_profile(bot)
-    dp = build_dispatcher(settings)
-    logging.info("Starting Telegram Voice Summary Bot...")
-    await dp.start_polling(bot)
+    async with bot:
+        await bot.delete_webhook(drop_pending_updates=False)
+        await configure_bot_profile(bot)
+        dp = build_dispatcher(settings)
+        logging.info("Starting Telegram Voice Summary Bot...")
+        await dp.start_polling(bot)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+_SENTINEL_PREFIX = "__CHAT_HISTORY__:"
+
+
+def _sanitize_display_name(raw: Any, fallback: str = "گوینده") -> str:
+    cleaned = " ".join(str(raw or "").split())
+    if cleaned.startswith(_SENTINEL_PREFIX):
+        cleaned = cleaned[len(_SENTINEL_PREFIX) :].strip()
+    return cleaned or fallback
+
 
 def _extract_speaker_from_message(msg: Any) -> str:
     """Extract the original speaker's display name from forward_origin or from_user."""
@@ -15,23 +24,23 @@ def _extract_speaker_from_message(msg: Any) -> str:
                 sender_user, "first_name", None
             )
             if name:
-                return str(name).strip()
+                return _sanitize_display_name(name)
 
         sender_user_name = getattr(origin, "sender_user_name", None)
         if sender_user_name:
-            return str(sender_user_name).strip()
+            return _sanitize_display_name(sender_user_name)
 
         sender_chat = getattr(origin, "sender_chat", None)
         if sender_chat is not None:
             title = getattr(sender_chat, "title", None)
             if title:
-                return str(title).strip()
+                return _sanitize_display_name(title)
 
         chat = getattr(origin, "chat", None)
         if chat is not None:
             title = getattr(chat, "title", None)
             if title:
-                return str(title).strip()
+                return _sanitize_display_name(title)
 
     from_user = getattr(msg, "from_user", None)
     if from_user is not None:
@@ -39,19 +48,19 @@ def _extract_speaker_from_message(msg: Any) -> str:
             from_user, "first_name", None
         )
         if name:
-            return str(name).strip()
+            return _sanitize_display_name(name)
 
     sender_chat = getattr(msg, "sender_chat", None)
     if sender_chat is not None:
         title = getattr(sender_chat, "title", None)
         if title:
-            return str(title).strip()
+            return _sanitize_display_name(title)
 
     chat = getattr(msg, "chat", None)
     if chat is not None and getattr(chat, "type", "") == "channel":
         title = getattr(chat, "title", None)
         if title:
-            return str(title).strip()
+            return _sanitize_display_name(title)
 
     return "گوینده"
 
@@ -60,10 +69,21 @@ extract_speaker_name = _extract_speaker_from_message
 
 
 def extract_chat_sender_label(msg: Any) -> str:
-    """Return sender display name with optional @username for unambiguous per-member chat Q&A."""
+    """Return sender display name with optional @username without blaming forwarder."""
     name = _extract_speaker_from_message(msg)
-    from_user = getattr(msg, "from_user", None)
-    username = getattr(from_user, "username", None) if from_user is not None else None
+    origin = getattr(msg, "forward_origin", None)
+
+    username: str | None = None
+    if origin is not None:
+        orig_user = getattr(origin, "sender_user", None)
+        orig_chat = getattr(origin, "sender_chat", None) or getattr(origin, "chat", None)
+        username = (
+            getattr(orig_user, "username", None) if orig_user is not None else None
+        ) or (getattr(orig_chat, "username", None) if orig_chat is not None else None)
+    else:
+        from_user = getattr(msg, "from_user", None)
+        username = getattr(from_user, "username", None) if from_user is not None else None
+
     if username:
         clean_handle = str(username).lstrip("@").strip()
         if clean_handle and clean_handle.lower() not in name.lower():
@@ -72,15 +92,15 @@ def extract_chat_sender_label(msg: Any) -> str:
 
 
 def extract_voice_target(message: Any) -> tuple[Any, str] | None:
-    """Return (media_obj, speaker_name) from message or its reply_to_message, or None."""
+    """Return (media_obj, speaker_name) preferring direct voice/audio, then replied voice/audio."""
+    media = getattr(message, "voice", None) or getattr(message, "audio", None)
+    if media is not None:
+        return media, _extract_speaker_from_message(message)
+
     replied = getattr(message, "reply_to_message", None)
     if replied is not None:
         media = getattr(replied, "voice", None) or getattr(replied, "audio", None)
         if media is not None:
             return media, _extract_speaker_from_message(replied)
-
-    media = getattr(message, "voice", None) or getattr(message, "audio", None)
-    if media is not None:
-        return media, _extract_speaker_from_message(message)
 
     return None

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from src.exceptions import ProviderChainExhaustedError, ProviderError
+from src.services.http_utils import redact_secrets
 from src.services.stt.base import STTProvider, TranscriptionResult
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,9 @@ class STTManager:
                     provider=result.provider,
                 )
             except Exception as exc:  # noqa: BLE001
-                err_msg = f"{provider.name}: {exc}"
-                logger.warning("STT provider %s failed: %s", provider.name, exc)
+                safe_exc = redact_secrets(str(exc))
+                err_msg = f"{provider.name}: {safe_exc}"
+                logger.warning("STT provider %s failed: %s", provider.name, safe_exc)
                 errors.append(err_msg)
 
         raise ProviderChainExhaustedError(errors)

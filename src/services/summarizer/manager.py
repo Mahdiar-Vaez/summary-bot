@@ -6,6 +6,7 @@ import logging
 from typing import Callable, Awaitable, Sequence
 
 from src.exceptions import ProviderChainExhaustedError, ProviderError
+from src.services.http_utils import redact_secrets
 from src.services.summarizer.base import SummarizerProvider, SummaryResult
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,9 @@ class SummarizerManager:
                     provider=result.provider,
                 )
             except Exception as exc:  # noqa: BLE001
-                err_msg = f"{provider.name}: {exc}"
-                logger.warning("LLM provider %s failed: %s", provider.name, exc)
+                safe_exc = redact_secrets(str(exc))
+                err_msg = f"{provider.name}: {safe_exc}"
+                logger.warning("LLM provider %s failed: %s", provider.name, safe_exc)
                 errors.append(err_msg)
 
         raise ProviderChainExhaustedError(errors)

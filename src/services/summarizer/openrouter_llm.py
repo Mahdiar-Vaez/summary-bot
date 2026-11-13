@@ -5,6 +5,11 @@ from __future__ import annotations
 import httpx
 
 from src.exceptions import ProviderError
+from src.services.http_utils import (
+    extract_openai_chat_text,
+    parse_json_response,
+    redact_secrets,
+)
 from src.services.stt.base import normalize_language
 from src.services.summarizer.base import SummaryResult
 from src.services.summarizer.prompts import build_chat_qa_prompt, build_summary_prompt
@@ -63,20 +68,15 @@ class OpenRouterSummarizerProvider:
                         OPENROUTER_CHAT_URL, headers=headers, json=payload
                     )
         except httpx.HTTPError as exc:
-            raise ProviderError(f"OpenRouter network error: {exc}") from exc
+            raise ProviderError(f"OpenRouter network error: {redact_secrets(str(exc))}") from exc
 
         if response.status_code != 200:
             raise ProviderError(
-                f"OpenRouter HTTP {response.status_code}: {response.text[:250]}"
+                redact_secrets(f"OpenRouter HTTP {response.status_code}: {response.text[:250]}")
             )
 
-        data = response.json()
-        try:
-            output_text = (
-                data["choices"][0]["message"]["content"] or ""
-            ).strip()
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderError(f"OpenRouter unexpected response: {data}") from exc
+        data = parse_json_response(response, "OpenRouter")
+        output_text = extract_openai_chat_text(data, "OpenRouter")
 
         if not output_text:
             raise ProviderError("OpenRouter returned empty response")
@@ -117,5 +117,5 @@ class OpenRouterSummarizerProvider:
             user_prompt,
             norm_lang,
             temperature=0.7,
-            max_tokens=450,
+            max_tokens=1200,
         )

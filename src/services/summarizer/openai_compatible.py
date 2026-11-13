@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import re
-
 import httpx
 
 from src.exceptions import ProviderError
+from src.services.http_utils import (
+    extract_openai_chat_text,
+    parse_json_response,
+    redact_secrets,
+)
 from src.services.stt.base import normalize_language
 from src.services.summarizer.base import SummaryResult
 from src.services.summarizer.prompts import build_chat_qa_prompt, build_summary_prompt
-
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
 
 
 class OpenAICompatibleSummarizerProvider:
@@ -74,20 +75,15 @@ class OpenAICompatibleSummarizerProvider:
                         self.chat_url, headers=headers, json=payload
                     )
         except httpx.HTTPError as exc:
-            raise ProviderError(f"{self.name} network error: {exc}") from exc
+            raise ProviderError(f"{self.name} network error: {redact_secrets(str(exc))}") from exc
 
         if response.status_code != 200:
             raise ProviderError(
-                f"{self.name} HTTP {response.status_code}: {response.text[:250]}"
+                redact_secrets(f"{self.name} HTTP {response.status_code}: {response.text[:250]}")
             )
 
-        data = response.json()
-        try:
-            raw_text = data["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderError(f"{self.name} unexpected response: {data}") from exc
-
-        output_text = _THINK_BLOCK_RE.sub("", raw_text).strip()
+        data = parse_json_response(response, self.name)
+        output_text = extract_openai_chat_text(data, self.name)
         if not output_text:
             raise ProviderError(f"{self.name} returned empty response")
 
@@ -127,5 +123,5 @@ class OpenAICompatibleSummarizerProvider:
             user_prompt,
             norm_lang,
             temperature=0.7,
-            max_tokens=450,
+            max_tokens=1200,
         )

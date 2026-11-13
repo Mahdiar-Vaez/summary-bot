@@ -45,11 +45,16 @@ class Settings(BaseSettings):
 
     def has_any_llm_provider(self) -> bool:
         """Return True if at least one LLM summarizer provider has valid credentials."""
-        return any(
+        has_fallback = bool(
+            self.fallback_llm_api_key
+            and self.fallback_llm_api_key.strip()
+            and self.fallback_llm_base_url
+            and self.fallback_llm_base_url.strip()
+        )
+        return has_fallback or any(
             bool(key and key.strip())
             for key in (
                 self.gemini_api_key,
-                self.fallback_llm_api_key,
                 self.groq_api_key,
                 self.openrouter_api_key,
             )

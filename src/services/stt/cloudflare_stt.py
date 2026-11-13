@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 
 from src.exceptions import ProviderError
+from src.services.http_utils import parse_json_response, redact_secrets
 from src.services.stt.base import TranscriptionResult, normalize_language
 
 
@@ -46,15 +47,19 @@ class CloudflareWhisperProvider:
                 async with httpx.AsyncClient(timeout=self._timeout) as client:
                     response = await client.post(url, headers=headers, content=audio_bytes)
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Cloudflare STT network error: {exc}") from exc
+            raise ProviderError(f"Cloudflare STT network error: {redact_secrets(str(exc))}") from exc
 
         if response.status_code != 200:
             raise ProviderError(
-                f"Cloudflare STT HTTP {response.status_code}: {response.text[:250]}"
+                redact_secrets(f"Cloudflare STT HTTP {response.status_code}: {response.text[:250]}")
             )
 
-        payload = response.json()
-        result_obj = payload.get("result") or {}
+        payload = parse_json_response(response, "Cloudflare STT")
+        if isinstance(payload, dict) and (payload.get("success") is False or payload.get("errors")):
+            raise ProviderError(
+                redact_secrets(f"Cloudflare STT API error: {payload.get('errors')}")
+            )
+        result_obj = (payload.get("result") if isinstance(payload, dict) else None) or {}
         text = (result_obj.get("text") or "").strip()
         if not text:
             raise ProviderError("Cloudflare STT returned empty text")

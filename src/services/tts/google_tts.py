@@ -15,13 +15,24 @@ def _split_tts_chunks(text: str, max_chars: int = 180) -> list[str]:
     chunks: list[str] = []
     current = ""
     for word in words:
+        if len(word) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            for i in range(0, len(word), max_chars):
+                part = word[i : i + max_chars]
+                if len(part) == max_chars:
+                    chunks.append(part)
+                else:
+                    current = part
+            continue
         candidate = f"{current} {word}".strip() if current else word
         if len(candidate) <= max_chars:
             current = candidate
         else:
             if current:
                 chunks.append(current)
-            current = word[:max_chars]
+            current = word
     if current:
         chunks.append(current)
     return chunks
@@ -40,6 +51,14 @@ class GoogleTranslateTTSProvider:
         self._client = client
         self._timeout = timeout
 
+    @staticmethod
+    def _validate_audio_response(resp: httpx.Response) -> None:
+        if resp.status_code != 200 or not resp.content:
+            raise ProviderError(f"Google TTS HTTP {resp.status_code}")
+        ctype = (resp.headers.get("content-type") or "").lower()
+        if ctype and not ctype.startswith(("audio/", "application/octet-stream")):
+            raise ProviderError(f"Google TTS returned non-audio content-type: {ctype}")
+
     async def synthesize(self, text: str, language: str) -> TTSResult:
         norm_lang = normalize_language(language, text)
         spoken_text = clean_text_for_tts(text)
@@ -57,19 +76,19 @@ class GoogleTranslateTTSProvider:
                         f"?ie=UTF-8&client=tw-ob&tl={norm_lang}&q={quote(chunk)}"
                     )
                     resp = await self._client.get(url)
-                    if resp.status_code != 200 or not resp.content:
-                        raise ProviderError(f"Google TTS HTTP {resp.status_code}")
+                    self._validate_audio_response(resp)
                     audio_parts.append(resp.content)
             else:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                async with httpx.AsyncClient(
+                    timeout=self._timeout, follow_redirects=True
+                ) as client:
                     for chunk in chunks:
                         url = (
                             f"https://translate.google.com/translate_tts"
                             f"?ie=UTF-8&client=tw-ob&tl={norm_lang}&q={quote(chunk)}"
                         )
                         resp = await client.get(url)
-                        if resp.status_code != 200 or not resp.content:
-                            raise ProviderError(f"Google TTS HTTP {resp.status_code}")
+                        self._validate_audio_response(resp)
                         audio_parts.append(resp.content)
         except httpx.HTTPError as exc:
             raise ProviderError(f"Google TTS network error: {exc}") from exc

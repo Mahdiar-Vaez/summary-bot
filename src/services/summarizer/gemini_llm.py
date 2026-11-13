@@ -5,6 +5,11 @@ from __future__ import annotations
 import httpx
 
 from src.exceptions import ProviderError
+from src.services.http_utils import (
+    extract_gemini_parts_text,
+    parse_json_response,
+    redact_secrets,
+)
 from src.services.stt.base import normalize_language
 from src.services.summarizer.base import SummaryResult
 from src.services.summarizer.prompts import build_chat_qa_prompt, build_summary_prompt
@@ -37,8 +42,12 @@ class GeminiSummarizerProvider:
     ) -> SummaryResult:
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:generateContent?key={self.api_key}"
+            f"{self.model}:generateContent"
         )
+        headers = {
+            "x-goog-api-key": self.api_key,
+            "Content-Type": "application/json",
+        }
         gen_cfg: dict[str, object] = {"temperature": temperature}
         if max_output_tokens is not None:
             gen_cfg["maxOutputTokens"] = max_output_tokens
@@ -50,24 +59,20 @@ class GeminiSummarizerProvider:
 
         try:
             if self._client is not None:
-                response = await self._client.post(url, json=payload)
+                response = await self._client.post(url, headers=headers, json=payload)
             else:
                 async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    response = await client.post(url, json=payload)
+                    response = await client.post(url, headers=headers, json=payload)
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Gemini network error: {exc}") from exc
+            raise ProviderError(f"Gemini network error: {redact_secrets(str(exc))}") from exc
 
         if response.status_code != 200:
             raise ProviderError(
-                f"Gemini HTTP {response.status_code}: {response.text[:250]}"
+                redact_secrets(f"Gemini HTTP {response.status_code}: {response.text[:250]}")
             )
 
-        data = response.json()
-        try:
-            parts = data["candidates"][0]["content"]["parts"]
-            output_text = "".join(p.get("text", "") for p in parts).strip()
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderError(f"Gemini unexpected response structure: {data}") from exc
+        data = parse_json_response(response, "Gemini")
+        output_text = extract_gemini_parts_text(data, "Gemini")
 
         if not output_text:
             raise ProviderError("Gemini returned empty response")
@@ -108,5 +113,5 @@ class GeminiSummarizerProvider:
             user_prompt,
             norm_lang,
             temperature=0.7,
-            max_output_tokens=450,
+            max_output_tokens=1200,
         )

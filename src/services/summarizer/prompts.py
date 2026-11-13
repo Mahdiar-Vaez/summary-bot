@@ -9,15 +9,41 @@ from src.services.stt.base import normalize_language
 CHAT_HISTORY_SPEAKER_PREFIX = "__CHAT_HISTORY__:"
 
 
+def _escape_triple_quotes(text: str) -> str:
+    """Prevent untrusted user text from breaking out of triple-quoted prompt blocks."""
+    return (text or "").replace('"""', "'''")
+
+
+def _clean_prompt_name(name: str, fallback: str = "گوینده") -> str:
+    """Collapse whitespace/newlines and guard display names used inside system prompts."""
+    cleaned = " ".join(_escape_triple_quotes(str(name or "")).split())
+    if cleaned.startswith(CHAT_HISTORY_SPEAKER_PREFIX):
+        cleaned = cleaned[len(CHAT_HISTORY_SPEAKER_PREFIX) :].strip()
+    return (cleaned or fallback)[:80]
+
+
 def build_summary_prompt(
-    transcript: str, speaker_name: str, language: str
+    transcript: str,
+    speaker_name: str,
+    language: str,
+    *,
+    is_chat_history: bool = False,
+    message_count: int | None = None,
 ) -> tuple[str, str]:
     """Build (system_prompt, user_prompt) for either a voice message or recent chat messages."""
-    speaker = (speaker_name or "گوینده").strip()
+    raw_speaker = (speaker_name or "گوینده").strip()
     norm_lang = normalize_language(language, transcript)
+    safe_transcript = _escape_triple_quotes(transcript)
 
-    if speaker.startswith(CHAT_HISTORY_SPEAKER_PREFIX):
-        count_label = speaker.split(":", 1)[1].strip() or "چند"
+    if is_chat_history or raw_speaker.startswith(CHAT_HISTORY_SPEAKER_PREFIX):
+        if message_count is not None:
+            count_label = str(message_count)
+        elif raw_speaker.startswith(CHAT_HISTORY_SPEAKER_PREFIX):
+            count_label = (
+                " ".join(raw_speaker.split(":", 1)[1].split())[:20] or "چند"
+            )
+        else:
+            count_label = "چند"
         if norm_lang == "fa":
             system_prompt = (
                 "تو یک دستیار هوشمند خلاصه‌ساز گفتگوهای گروه و کانال تلگرام هستی.\n"
@@ -30,7 +56,7 @@ def build_summary_prompt(
                 "۵. لحن متن کاملاً خودمونی، روان و جذاب باشد."
             )
             user_prompt = (
-                f"لیست {count_label} پیام آخر گفتگو:\n\"\"\"\n{transcript}\n\"\"\"\n\n"
+                f"لیست {count_label} پیام آخر گفتگو:\n\"\"\"\n{safe_transcript}\n\"\"\"\n\n"
                 f"لطفاً خلاصه خیلی کوتاه، خودمونی و جامع این پیام‌ها را (با حذف کلمات بی‌معنی و فرمت مارک‌داون `**بولد**` برای نکات و اسامی مهم) با تیتر «📌 خلاصه {count_label} پیام آخر گفتگو:» بنویس."
             )
         else:
@@ -45,10 +71,12 @@ def build_summary_prompt(
                 "5. Ensure the final summary is clean and coherent."
             )
             user_prompt = (
-                f"Recent {count_label} chat messages:\n\"\"\"\n{transcript}\n\"\"\"\n\n"
+                f"Recent {count_label} chat messages:\n\"\"\"\n{safe_transcript}\n\"\"\"\n\n"
                 f"Please provide the super short, casual summary starting with '📌 Summary of Last {count_label} Messages:' covering all topics and important details."
             )
         return system_prompt, user_prompt
+
+    speaker = _clean_prompt_name(raw_speaker, fallback="گوینده")
 
     if norm_lang == "fa":
         system_prompt = (
@@ -64,7 +92,7 @@ def build_summary_prompt(
             "۶. کلمات بی‌معنی، نامربوط، تپق‌ها، تکیه‌کلام‌ها و نویزهای گفتاری وسط جمله (مانند «مثلاً مثلاً»، «چیز»، «اممم»، «ینی»، «عرضم به حضورت»، «چیزه») را بررسی و کاملاً حذف کن، به شرطی که به جزئیات، اسامی و مفاهیم اصلی پیام آسیبی نزند و متن خلاصه کاملاً تمیز، معنادار و بدون کلمات زائد باشد."
         )
         user_prompt = (
-            f"متن پیاده‌شده از ویس:\n\"\"\"\n{transcript}\n\"\"\"\n\n"
+            f"متن پیاده‌شده از ویس:\n\"\"\"\n{safe_transcript}\n\"\"\"\n\n"
             f"لطفاً خلاصه خیلی خیلی کوتاه و خودمونی این ویس را (با بررسی و حذف کلمات بی‌معنی و تپق‌های وسط جمله بدون آسیب به جزئیات مهم مثل نام افراد و زمان کاری، و بولد کردن نکات کلیدی با `**...**`) فقط با تیتر بالای «📌 خلاصه صحبت‌های {speaker}:» بنویس."
         )
     else:
@@ -81,7 +109,7 @@ def build_summary_prompt(
             "5. Carefully filter out and remove meaningless filler words, verbal tics, stammering, and irrelevant speech disfluencies (e.g., 'um', 'uh', 'you know', 'like', stumbled repetitions) from the middle of sentences, as long as it does not affect any critical details, names, or facts."
         )
         user_prompt = (
-            f"Voice transcript:\n\"\"\"\n{transcript}\n\"\"\"\n\n"
+            f"Voice transcript:\n\"\"\"\n{safe_transcript}\n\"\"\"\n\n"
             f"Please provide the super short, casual summary starting with '📌 Summary of {speaker}'s voice:' (filtering out meaningless filler words while strictly keeping all names, working hours, and critical details)."
         )
 
@@ -91,16 +119,22 @@ def build_summary_prompt(
 MAX_CHAT_QA_HISTORY_CHARS = 48_000
 
 _SENSITIVE_SECRET_PATTERNS = (
-    re.compile(r"\b(?:AIza[0-9A-Za-z\-_]{20,}|gsk_[0-9A-Za-z]{20,}|sk-[0-9A-Za-z\-_]{16,})\b"),
-    re.compile(r"\b\d{8,12}:[A-Za-z0-9_\-]{30,}\b"),  # Telegram bot token pattern
-    re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),  # IPv4 addresses
+    re.compile(
+        r"(?<![A-Za-z0-9_\-])"
+        r"(?:AQ\.[A-Za-z0-9_\-]{10,}|AIza[0-9A-Za-z\-_]{16,}|gsk_[0-9A-Za-z\-_]{16,}|sk-(?:or-v1-|proj-)?[0-9A-Za-z\-_]{12,})"
+        r"(?![A-Za-z0-9_\-])"
+    ),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{16,}", re.IGNORECASE),
+    re.compile(r"([?&](?:key|api_key|token|access_token)=)[^&\s'\"<>]+", re.IGNORECASE),
+    re.compile(r"(?<![0-9A-Za-z])\d{8,14}:[A-Za-z0-9_\-]{25,}(?![0-9A-Za-z_\-])"),
+    re.compile(r"(?<![0-9۰-۹٠-٩.])(?:[0-9۰-۹٠-٩]{1,3}\.){3}[0-9۰-۹٠-٩]{1,3}(?![0-9۰-۹٠-٩.])"),
 )
 
 _SENSITIVE_INFRA_KEYWORDS = (
     "پارس پک",
-    "پارس‌پک",
-    "پالس‌پک",
+    "پارسپک",
     "پالس پک",
+    "پالسپک",
     "parspack",
     "hetzner",
     "arvan",
@@ -115,28 +149,49 @@ _SENSITIVE_INFRA_KEYWORDS = (
     "سرور از",
 )
 
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\ufeff]")
+_MSG_BLOCK_HEADER_RE = re.compile(r"^\[[^\]]+\]:")
+
 
 def sanitize_sensitive_text(text: str) -> str:
-    """Redact API keys, tokens, and IPv4 addresses from input or output text."""
+    """Redact API keys, Bearer/query tokens, bot tokens, and IPv4 addresses."""
     cleaned = text or ""
     for pattern in _SENSITIVE_SECRET_PATTERNS:
-        cleaned = pattern.sub("[محرمانه]", cleaned)
+        if pattern.groups == 1:
+            cleaned = pattern.sub(r"\1[محرمانه]", cleaned)
+        else:
+            cleaned = pattern.sub("[محرمانه]", cleaned)
     return cleaned
 
 
+def _contains_sensitive_infra(text: str) -> bool:
+    """Normalize zero-width chars and whitespace before matching sensitive infra keywords."""
+    no_zw = _ZERO_WIDTH_RE.sub(" ", text or "")
+    collapsed = " ".join(no_zw.lower().split())
+    tight = collapsed.replace(" ", "")
+    return any(kw in collapsed or kw.replace(" ", "") in tight for kw in _SENSITIVE_INFRA_KEYWORDS)
+
+
 def _filter_sensitive_chat_history(chat_history: str) -> str:
-    """Drop or redact lines from chat Q&A history that contain owner/server infrastructure secrets."""
-    safe_lines: list[str] = []
+    """Drop whole multi-line message blocks mentioning infra secrets and redact tokens/IPs."""
+    blocks: list[list[str]] = []
     for line in (chat_history or "").splitlines():
-        lowered = line.lower()
-        if any(kw in lowered for kw in _SENSITIVE_INFRA_KEYWORDS):
+        if _MSG_BLOCK_HEADER_RE.match(line) or not blocks:
+            blocks.append([line])
+        else:
+            blocks[-1].append(line)
+
+    safe_blocks: list[str] = []
+    for block in blocks:
+        joined = "\n".join(block)
+        if _contains_sensitive_infra(joined):
             continue
-        safe_lines.append(sanitize_sensitive_text(line))
-    return "\n".join(safe_lines)
+        safe_blocks.append(sanitize_sensitive_text(joined))
+    return "\n".join(safe_blocks)
 
 
 def _trim_history_to_recent_chars(chat_history: str, max_chars: int = MAX_CHAT_QA_HISTORY_CHARS) -> str:
-    """Keep the most recent lines up to `max_chars` so 200+ typical messages fit safely."""
+    """Keep the most recent sanitized lines up to `max_chars` so 200+ typical messages fit safely."""
     clean = _filter_sensitive_chat_history(chat_history).strip()
     if len(clean) <= max_chars:
         return clean
@@ -156,9 +211,9 @@ def build_chat_qa_prompt(
     language: str = "fa",
 ) -> tuple[str, str]:
     """Build (system_prompt, user_prompt) for ultra-concise, fun, isolated per-chat Q&A."""
-    clean_question = sanitize_sensitive_text((question or "").strip())
-    asker = (asker_name or "کاربر").strip()
-    trimmed_history = _trim_history_to_recent_chars(chat_history)
+    clean_question = _escape_triple_quotes(sanitize_sensitive_text((question or "").strip()))
+    asker = _clean_prompt_name(asker_name, fallback="کاربر")
+    trimmed_history = _escape_triple_quotes(_trim_history_to_recent_chars(chat_history))
     norm_lang = normalize_language(language, f"{clean_question}\n{trimmed_history}")
 
     history_block = trimmed_history or (
@@ -170,14 +225,21 @@ def build_chat_qa_prompt(
     for turn in session_turns[-6:]:
         if len(turn) == 3:
             u_name, q, a = turn
-            turns_lines.append(
-                f"{u_name}: {q}\nربات: {a}" if norm_lang == "fa" else f"{u_name}: {q}\nBot: {a}"
-            )
         elif len(turn) == 2:
+            u_name = "کاربر" if norm_lang == "fa" else "User"
             q, a = turn
-            turns_lines.append(
-                f"کاربر: {q}\nربات: {a}" if norm_lang == "fa" else f"User: {q}\nBot: {a}"
-            )
+        else:
+            continue
+        if _contains_sensitive_infra(f"{q}\n{a}"):
+            continue
+        safe_u = _clean_prompt_name(u_name, fallback="کاربر" if norm_lang == "fa" else "User")
+        safe_q = _escape_triple_quotes(sanitize_sensitive_text(str(q or "")))
+        safe_a = _escape_triple_quotes(sanitize_sensitive_text(str(a or "")))
+        turns_lines.append(
+            f"{safe_u}: {safe_q}\nربات: {safe_a}"
+            if norm_lang == "fa"
+            else f"{safe_u}: {safe_q}\nBot: {safe_a}"
+        )
     session_block = "\n---\n".join(turns_lines) if turns_lines else (
         "(شروع گفتگوی جدید در همین چت)" if norm_lang == "fa" else "(Start of a fresh session)"
     )

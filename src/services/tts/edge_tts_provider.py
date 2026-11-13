@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import edge_tts
 
@@ -20,10 +21,19 @@ class EdgeTTSProvider:
         fa_voice: str = "fa-IR-DilaraNeural",
         en_voice: str = "en-US-AriaNeural",
         proxy: str | None = None,
+        timeout: float = 30.0,
     ) -> None:
         self.fa_voice = fa_voice
         self.en_voice = en_voice
         self.proxy = proxy
+        self._timeout = timeout
+
+    async def _collect_audio(self, communicate: edge_tts.Communicate) -> bytes:
+        audio_chunks: list[bytes] = []
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio" and chunk.get("data"):
+                audio_chunks.append(chunk["data"])
+        return b"".join(audio_chunks)
 
     async def synthesize(self, text: str, language: str) -> TTSResult:
         norm_lang = normalize_language(language, text)
@@ -35,18 +45,20 @@ class EdgeTTSProvider:
         active_proxy = (
             self.proxy
             or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
             or os.environ.get("HTTP_PROXY")
+            or os.environ.get("http_proxy")
             or None
         )
         try:
             communicate = edge_tts.Communicate(
                 spoken_text, voice, rate="+5%", proxy=active_proxy
             )
-            audio_chunks: list[bytes] = []
-            async for chunk in communicate.stream():
-                if chunk.get("type") == "audio" and chunk.get("data"):
-                    audio_chunks.append(chunk["data"])
-            audio_bytes = b"".join(audio_chunks)
+            audio_bytes = await asyncio.wait_for(
+                self._collect_audio(communicate), timeout=self._timeout
+            )
+        except TimeoutError as exc:
+            raise ProviderError(f"Edge TTS timeout after {self._timeout}s") from exc
         except Exception as exc:  # noqa: BLE001
             raise ProviderError(f"Edge TTS error: {exc}") from exc
 

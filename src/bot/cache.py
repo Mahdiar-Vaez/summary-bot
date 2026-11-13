@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import tempfile
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -97,8 +99,8 @@ class TranscriptCache:
         self._completed_voices: OrderedDict[str, float] = OrderedDict()
         self._chat_history: OrderedDict[str, deque[ChatMessageEntry]] = OrderedDict()
         self._chat_sessions: OrderedDict[str, deque[tuple[str, str, str]]] = OrderedDict()
-        self._chat_rate_windows: dict[str, deque[float]] = {}
-        self._prompt_message_ids: dict[str, int] = {}
+        self._chat_rate_windows: OrderedDict[str, deque[float]] = OrderedDict()
+        self._prompt_message_ids: OrderedDict[str, int] = OrderedDict()
         self._feedbacks: OrderedDict[str, FeedbackEntry] = OrderedDict()
         self._users_stats: dict[str, dict[str, Any]] = {}
         self._chats_stats: dict[str, dict[str, Any]] = {}
@@ -117,23 +119,46 @@ class TranscriptCache:
             logger.warning("Failed to load %s: %s", path, exc)
             return None
 
-    def _save_json_safe(self, path: Path | None, payload: Any) -> None:
+    def _save_json_safe(
+        self, path: Path | None, payload: Any, *, compact: bool = False
+    ) -> None:
         if path is None:
             return
+        tmp_path: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            serialized = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":") if compact else None,
+                indent=None if compact else 2,
             )
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+            )
+            tmp_path = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(serialized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to save %s: %s", path, exc)
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     def _load_chat_history(self) -> None:
         raw = self._load_json_safe(self.persistence_path)
         if not isinstance(raw, dict):
             return
         now = time.monotonic()
-        for chat_key, items in raw.items():
+        items_list = list(raw.items())[-self.max_items :]
+        for chat_key, items in items_list:
             if not isinstance(items, list):
                 continue
             q: deque[ChatMessageEntry] = deque(maxlen=self.max_messages_per_chat)
@@ -154,7 +179,7 @@ class TranscriptCache:
             chat_key: [{"sender": entry.sender, "text": entry.text} for entry in entries]
             for chat_key, entries in self._chat_history.items()
         }
-        self._save_json_safe(self.persistence_path, payload)
+        self._save_json_safe(self.persistence_path, payload, compact=True)
 
     def _load_feedbacks(self) -> None:
         raw = self._load_json_safe(self.feedback_path)
@@ -201,9 +226,15 @@ class TranscriptCache:
         language: str = "fa",
         linked_transcript_cache_id: str | None = None,
     ) -> str:
-        """Create and register a new feedback target for a bot output message."""
+        """Create and persist a feedback target, preferring to evict unvoted items first."""
         while len(self._feedbacks) >= MAX_PERSISTED_FEEDBACKS:
-            self._feedbacks.popitem(last=False)
+            unvoted_key = next(
+                (k for k, v in self._feedbacks.items() if v.rating is None), None
+            )
+            if unvoted_key is not None:
+                self._feedbacks.pop(unvoted_key, None)
+            else:
+                self._feedbacks.popitem(last=False)
 
         fb_id = uuid.uuid4().hex[:10]
         clean_preview = " ".join((preview or "").split())[:180]
@@ -218,6 +249,7 @@ class TranscriptCache:
             linked_transcript_cache_id=linked_transcript_cache_id,
         )
         self._feedbacks[fb_id] = entry
+        self._save_feedbacks()
         return fb_id
 
     def get_feedback_target(self, fb_id: str) -> FeedbackEntry | None:
@@ -274,7 +306,16 @@ class TranscriptCache:
         self._save_json_safe(
             self.users_stats_path,
             {"users": self._users_stats, "chats": self._chats_stats},
+            compact=True,
         )
+
+    @staticmethod
+    def _prune_stats_dict(store: dict[str, dict[str, Any]], max_entries: int) -> None:
+        if len(store) <= max_entries:
+            return
+        by_oldest = sorted(store.items(), key=lambda kv: str(kv[1].get("last_seen", "")))
+        for key, _ in by_oldest[: len(store) - max_entries]:
+            store.pop(key, None)
 
     def record_activity(
         self,
@@ -309,12 +350,12 @@ class TranscriptCache:
                 }
             else:
                 existing["name"] = clean_name or existing.get("name", "کاربر")
-                if clean_handle:
-                    existing["username"] = clean_handle
+                existing["username"] = clean_handle
                 existing["last_seen"] = ts
                 existing["total_events"] = int(existing.get("total_events", 0)) + 1
                 if is_direct:
                     existing["direct_interactions"] = int(existing.get("direct_interactions", 0)) + 1
+            self._prune_stats_dict(self._users_stats, 5000)
             changed = True
 
         if chat_id is not None:
@@ -337,6 +378,7 @@ class TranscriptCache:
                     existing_chat["chat_type"] = chat_type
                 existing_chat["last_seen"] = ts
                 existing_chat["total_events"] = int(existing_chat.get("total_events", 0)) + 1
+            self._prune_stats_dict(self._chats_stats, 2000)
             changed = True
 
         if changed:
@@ -423,7 +465,13 @@ class TranscriptCache:
 
     def set_prompt_message_id(self, chat_id: int | str, message_id: int | None) -> None:
         if message_id is not None:
-            self._prompt_message_ids[str(chat_id)] = int(message_id)
+            key = str(chat_id)
+            if key not in self._prompt_message_ids:
+                while len(self._prompt_message_ids) >= max(self.max_items, 500):
+                    self._prompt_message_ids.popitem(last=False)
+            else:
+                self._prompt_message_ids.move_to_end(key)
+            self._prompt_message_ids[key] = int(message_id)
 
     def pop_prompt_message_id(self, chat_id: int | str) -> int | None:
         return self._prompt_message_ids.pop(str(chat_id), None)
@@ -446,11 +494,19 @@ class TranscriptCache:
         for vk in expired_voices:
             self._completed_voices.pop(vk, None)
 
-    def add_chat_message(self, chat_id: int | str, sender: str, text: str) -> None:
+    def add_chat_message(
+        self,
+        chat_id: int | str,
+        sender: str,
+        text: str,
+        *,
+        deduplicate_recent: bool = False,
+    ) -> None:
         """Append a message strictly to `chat_id`'s isolated rolling buffer (>= 200 msgs)."""
         cleaned = (text or "").strip()
         if not cleaned:
             return
+        clean_sender = (sender or "کاربر").strip()
         key = str(chat_id)
         if key not in self._chat_history:
             while len(self._chat_history) >= self.max_items:
@@ -460,12 +516,16 @@ class TranscriptCache:
             self._chat_history.move_to_end(key)
 
         q = self._chat_history[key]
-        if q and q[-1].text == cleaned and q[-1].sender == (sender or "کاربر").strip():
+        if q and q[-1].text == cleaned and q[-1].sender == clean_sender:
+            return
+        if deduplicate_recent and any(
+            entry.text == cleaned and entry.sender == clean_sender for entry in q
+        ):
             return
 
         q.append(
             ChatMessageEntry(
-                sender=(sender or "کاربر").strip(),
+                sender=clean_sender,
                 text=cleaned,
                 created_at=time.monotonic(),
             )
@@ -518,7 +578,13 @@ class TranscriptCache:
         """
         current = time.monotonic() if now is None else float(now)
         key = str(chat_id)
-        window = self._chat_rate_windows.setdefault(key, deque())
+        if key not in self._chat_rate_windows:
+            while len(self._chat_rate_windows) >= max(self.max_items * 4, 2000):
+                self._chat_rate_windows.popitem(last=False)
+            self._chat_rate_windows[key] = deque()
+        else:
+            self._chat_rate_windows.move_to_end(key)
+        window = self._chat_rate_windows[key]
         cutoff = current - self.rate_limit_window_seconds
 
         while window and window[0] <= cutoff:

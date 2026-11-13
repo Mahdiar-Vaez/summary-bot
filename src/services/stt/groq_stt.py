@@ -6,9 +6,18 @@ from pathlib import Path
 import httpx
 
 from src.exceptions import ProviderError
+from src.services.http_utils import parse_json_response, redact_secrets
 from src.services.stt.base import TranscriptionResult, normalize_language
 
 GROQ_AUDIO_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+_MIME_BY_SUFFIX = {
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".webm": "audio/webm",
+}
 
 
 class GroqWhisperProvider:
@@ -40,7 +49,8 @@ class GroqWhisperProvider:
         }
 
         audio_bytes = audio_path.read_bytes()
-        files = {"file": (audio_path.name, audio_bytes, "audio/ogg")}
+        mime_type = _MIME_BY_SUFFIX.get(audio_path.suffix.lower(), "audio/ogg")
+        files = {"file": (audio_path.name, audio_bytes, mime_type)}
 
         try:
             if self._client is not None:
@@ -53,16 +63,18 @@ class GroqWhisperProvider:
                         GROQ_AUDIO_URL, headers=headers, data=data, files=files
                     )
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Groq network error: {exc}") from exc
+            raise ProviderError(f"Groq network error: {redact_secrets(str(exc))}") from exc
 
         if response.status_code != 200:
             raise ProviderError(
-                f"Groq STT HTTP {response.status_code}: {response.text[:250]}"
+                redact_secrets(f"Groq STT HTTP {response.status_code}: {response.text[:250]}")
             )
 
-        payload = response.json()
-        text = (payload.get("text") or "").strip()
-        raw_lang = payload.get("language") or ""
+        payload = parse_json_response(response, "Groq STT")
+        if isinstance(payload, dict) and payload.get("error"):
+            raise ProviderError(redact_secrets(f"Groq STT API error: {payload['error']}"))
+        text = ((payload.get("text") if isinstance(payload, dict) else "") or "").strip()
+        raw_lang = (payload.get("language") if isinstance(payload, dict) else "") or ""
         if not text:
             raise ProviderError("Groq STT returned empty text")
 
