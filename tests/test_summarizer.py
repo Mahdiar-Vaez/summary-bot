@@ -168,12 +168,12 @@ async def test_build_chat_qa_prompt_and_manager_chat_with_fallback():
         mode="chat",
         language="fa",
     )
-    # Verify creator identity, strict privacy protection, cheeky roast & zero-nonsense rule
+    # Verify creator identity, strict privacy protection, polite tone & grounded accuracy rule
     assert "مهدیار واعظ" in sys_lookup
     assert "نام سرور/هاست" in sys_lookup
-    assert "پُررو" in sys_lookup
-    assert "رُست" in sys_lookup
-    assert "چرت‌وپرت" in sys_lookup
+    assert "محترمانه" in sys_lookup
+    assert "باادب" in sys_lookup
+    assert "گستاخانه" in sys_lookup
 
     sys_secret, user_secret = build_chat_qa_prompt(
         chat_history=(

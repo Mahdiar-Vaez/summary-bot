@@ -1278,8 +1278,8 @@ async def test_vibe_dropdown_shows_username_picker_and_trailing_slash_commands(t
     assert "سحر" in llm_calls[-1]["question"] or "@sahar_dev" in llm_calls[-1]["question"]
 
 
-def test_chat_qa_prompt_balances_respectful_vs_provocative_tone_and_stalker_sharpness():
-    """Verify FA and EN chat prompts detect polite vs rude tone while preserving stalker-sharp recall & mild edge."""
+def test_chat_qa_prompt_is_standard_polite_respectful_assistant():
+    """Verify FA and EN chat prompts configure a polite, respectful, standard AI assistant without rudeness."""
     from src.services.summarizer.prompts import build_chat_qa_prompt
 
     sys_fa, _ = build_chat_qa_prompt(
@@ -1290,10 +1290,9 @@ def test_chat_qa_prompt_balances_respectful_vs_provocative_tone_and_stalker_shar
         mode="chat",
         language="fa",
     )
-    assert "استاکر" in sys_fa
-    assert "محترمانه" in sys_fa
-    assert "نامحترمانه" in sys_fa
-    assert "بی‌ادب" in sys_fa
+    assert "محترم" in sys_fa
+    assert "باادب" in sys_fa
+    assert "گستاخانه" in sys_fa  # explicitly forbidden
     assert "مهدیار واعظ" in sys_fa
 
     sys_en, _ = build_chat_qa_prompt(
@@ -1304,7 +1303,7 @@ def test_chat_qa_prompt_balances_respectful_vs_provocative_tone_and_stalker_shar
         mode="chat",
         language="en",
     )
-    assert "stalker" in sys_en.lower()
     assert "polite" in sys_en.lower()
-    assert "disrespectful" in sys_en.lower() or "rude" in sys_en.lower()
+    assert "respectful" in sys_en.lower()
+    assert "never be rude" in sys_en.lower()
     assert "Mahdiar Vaez" in sys_en

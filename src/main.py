@@ -181,7 +181,7 @@ async def configure_bot_profile(bot: Bot) -> None:
                 ),
                 BotCommand(
                     command="vibe",
-                    description="انتخاب کاربر (@username) یا تحلیل وایب و رُست فان (/vibe نام)",
+                    description="انتخاب کاربر (@username) یا تحلیل محترمانه سبک گفتگو (/vibe نام)",
                 ),
                 BotCommand(
                     command="summary_50",

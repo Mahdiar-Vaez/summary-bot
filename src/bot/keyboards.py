@@ -165,7 +165,7 @@ def build_vibe_target_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                text="🔥 تحلیل و رُست همه بچه‌های فعال",
+                text="👥 تحلیل و حال‌وهوای همه اعضای فعال",
                 callback_data=f"vibe:{picker_id}:all",
             )
         ]
